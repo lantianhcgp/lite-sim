@@ -32,8 +32,20 @@ export function parseHml(src) {
     const tag = tm[1];
     const node = { tag, attrs: parseAttrs(body.slice(tm[0].length)), children: [], text: "" };
     stack[stack.length - 1].children.push(node);
-    if (!selfClose && !VOID_LIKE.has(tag)) stack.push(node);
-    i = gt + 1;
+    if (!selfClose && !VOID_LIKE.has(tag)) { stack.push(node); i = gt + 1; }
+    else if (!selfClose && tag === "input") {
+      // Lite 允许 <input ...>文本</input>，文本即 value。input 在 VOID_LIKE 里不进栈，
+      // 若不显式收集，文本会落到父节点变成兄弟 #text → flex column 里 input(方块)在上、
+      // 文字在下（实测候选词 might/million 掉到键盘行上方就是这个）
+      const start = gt + 1;                    // input 标签结束之后才是子文本起点
+      const close = s.indexOf("</" + tag, start);
+      if (close >= start && s.slice(start, close).indexOf("<") < 0) {
+        node.text = s.slice(start, close);      // 可能含前后空白，渲染时 trim
+        const gt2 = s.indexOf(">", close);
+        i = gt2 >= 0 ? gt2 + 1 : close;
+      } else i = gt + 1;
+    }
+    else i = gt + 1;
   }
   function pushText(t) {
     if (!t.trim()) return;
@@ -602,8 +614,12 @@ export class Page {
     }
     if (cls.length) el.className = cls.join(" ");
     if (style.length) el.setAttribute("style", (el.getAttribute("style") || "") + ";" + style.join(";"));
-    // 透传事件属性值给 input
-    if (el.tagName === "INPUT" && a.value !== undefined) el.value = this._bindStr(String(a.value), scope);
+    // 透传事件属性值给 input；value 属性缺失时用子文本（Lite 的 <input>{{x}}</input> 写法）
+    if (el.tagName === "INPUT") {
+      const rawVal = a.value !== undefined ? a.value : String(node.text || "").trim();
+      if (rawVal !== undefined && rawVal !== "") el.value = this._bindStr(String(rawVal), scope);
+      else if (a.value !== undefined) el.value = "";
+    }
   }
 
   _bindStr(v, scope) {

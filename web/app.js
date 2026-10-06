@@ -671,6 +671,28 @@ window.addEventListener("unhandledrejection", e => {
   if (qs.get("smoke")) setTimeout(() => smoke(), 400);
   if (qs.get("journey")) setTimeout(() => journey(), 500);
   if (qs.get("pinyin")) setTimeout(() => pinyinTest(), 600);
+  // ?type=mi → 自动点字母打字（验证候选词 input 的 value/布局）
+  if (qs.get("type")) setTimeout(async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    runPage("pages/keyboard/keyboard");
+    await sleep(600);
+    for (const ch of qs.get("type")) {
+      const el = Array.from(document.querySelectorAll("#screen .im-key"))
+        .find(k => (k.textContent || "").trim() === ch);
+      if (el) el.click();
+      await sleep(160);
+    }
+    await sleep(500);
+    // 报告候选词 input 的 value + 坐标
+    const inputs = Array.from(document.querySelectorAll("#screen input"));
+    rep.push({ kind: "lifecycle", level: "info", code: "TYPE_REPORT",
+      title: `打字"${qs.get("type")}"完成`,
+      message: inputs.map((im, i) => {
+        const b = im.getBoundingClientRect();
+        return `#${i}value=${JSON.stringify(im.value)}@${Math.round(b.left)},${Math.round(b.top)} ${Math.round(b.width)}x${Math.round(b.height)}`;
+      }).join(" | "),
+      hint: "", file: "test", line: 0 });
+  }, 700);
   // ?debug=1 → 把画布内每个元素的实际渲染矩形报进日志（排查错位/溢出）
   if (qs.get("debug")) {
     setTimeout(() => {
@@ -680,6 +702,28 @@ window.addEventListener("unhandledrejection", e => {
       rep.push({ kind: "lifecycle", level: "info", code: "DEBUG_FRAME",
         title: `frame ${Math.round(fb.width)}x${Math.round(fb.height)} @${Math.round(fb.left)},${Math.round(fb.top)}`,
         message: "", hint: "", file: "debug", line: 0 });
+      // 视口/画布溢出检测：#frameWrap 我加了 width:412px，窄视口下可能溢出
+      (() => {
+        const de = document.documentElement;
+        const fw = document.getElementById("frameWrap"), fr = document.getElementById("frame");
+        const st = document.getElementById("stage");
+        const r = el => el ? (() => { const b = el.getBoundingClientRect(); return `${Math.round(b.width)}x${Math.round(b.height)}@${Math.round(b.left)},${Math.round(b.top)}`; })() : "无";
+        const overflow = de.scrollWidth > de.clientWidth;
+        rep.push({ kind: "api", level: overflow ? "warn" : "info", code: "VIEWPORT",
+          title: overflow ? `横向溢出 scrollW=${de.scrollWidth} clientW=${de.clientWidth}` : `视口正常 ${de.clientWidth}px`,
+          message: `stage=${r(st)} frameWrap=${r(fw)} frame=${r(fr)} body.scrollW=${document.body.scrollWidth}`,
+          hint: overflow ? "#frameWrap 固定 412px 超出窄视口" : "", file: "debug", line: 0 });
+      })();
+      // img 加载状态：complete/naturalWidth 才能区分「加载成功」「加载失败」「加载中」
+      document.querySelectorAll("#screen img").forEach((im, idx) => {
+        const st = im.complete
+          ? (im.naturalWidth > 0 ? `OK ${im.naturalWidth}x${im.naturalHeight}` : "FAIL(naturalWidth=0)")
+          : "LOADING";
+        rep.push({ kind: "api", level: st.startsWith("OK") ? "info" : "warn",
+          code: "IMG_STATE", title: `img#${idx} ${st}`,
+          message: (im.getAttribute("src") || "").slice(-70) + (im.style.background ? " [已降级占位]" : ""),
+          hint: "", file: "debug", line: 0 });
+      });
       const walk = (el, depth) => {
         const r = el.getBoundingClientRect();
         const cls = el.className || el.tagName.toLowerCase();

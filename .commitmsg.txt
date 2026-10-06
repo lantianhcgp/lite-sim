@@ -1,30 +1,32 @@
-fix: 画布容器宽 0 导致图标全部挤出画布（红圈问题根因）
+fix: 候选词文字掉到方块外（input 子文本被当兄弟节点）
 
-用户截图圈 4 处：候选词区、底栏左右空白、右下白色区、日志警告。
+用户截图：打字 mi 后，might/million/microsoft 等候选词文字显示在
+方块排的**下方**、挤到键盘字母行上方，方块里是空的。
 
-根因（坐标铁证，?debug=1 逐元素 rect）：
-  修复前 <div im-bottom-tab-container> x=0..0 (0x54)  ← 宽 0
-         <img> x=-171..-123                              ← 图标在画布外
-  修复后 x=0..412、img x=23..71                          ← 全部归位
+根因（parseHml）：
+  VOID_LIKE = ["input","img","progress"] → input 不进栈
+  于是 <input ...>{{$item}}</input> 的子文本被 pushText 到**父节点**
+  （list-item）成为兄弟 #text。flex column 布局下：
+    list-item
+      ├─ input (54×54, 带背景 = 方块)
+      └─ #text "{{$item}}"          ← 文字独立成行，掉在方块下面
 
-CSS 链断裂点：
-  #stage (flex column + align-items:center)
-    → #frameWrap { position:relative; background:#fff }   ← 没有宽度
-      → #frame { width:100%; max-width:412px }            ← 后一条规则覆盖 width:412px
-        → #screen { position:absolute; inset:0 }          ← 归零
-          → 所有 width:100% 子元素全链解析为 0
+而 _applyAttrs 只认 a.value 属性，hml 写的是子文本 → value 恒为空。
 
-align-items:center 会让 flex item 按内容收缩，而 #frame 要 100% 父宽、
-#frameWrap 要靠内容定宽 —— 循环依赖塌缩成 0。子元素因 width:0 而溢出，
-图标被挤到负坐标（x=-171），底栏只剩 input 单独居中。
+修两处：
+1. parseHml：input 有显式闭合时，把 start=gt+1..</input> 的内容收进
+   node.text（注意起点必须是标签结束后，否则 slice 会包含
+   `<input ...>` 自身、被 indexOf("<")<0 守卫误杀——第一版就栽在这）
+2. _applyAttrs：value 属性缺失时用 node.text（trim 后）作 el.value
 
-修：#frameWrap 加 width:412px;max-width:100%
+验证（?type=mi 自动打字 + TYPE_REPORT）：
+  修复前  #0 value="" #1 value="" ...
+  修复后  #0 value="might" #1 "million" #2 "microsoft"
+          #3 "miles" #4 "minutes" #5 "michael"
+  坐标 @93,217 54x54 依次 x+58（54+2+2 margin）✓
 
-同时修第二个 bug：hml 的 style 属性里常见
-  background-color: {{ RounderBackgroundValue.background }}
-_applyAttrs 对 style 直接 push 字符串不求值 → 整条声明无效 →
-图标容器背景透明、圆角丢失（图上看不到深色背景块）。
-→ style 也走 _bindStr() 求值
+另加 ?type=<词> 自动打字测试入口（?debug=1 下 TYPE_REPORT 报每个
+input 的 value+rect）。
 
-回归：checker 30/30、moduleloader 9/9、smoke 6/6、
-      journey 25/25、拼音 7/7
+回归：checker 30/30、moduleloader 9/9、全项目加载失败 0、
+      smoke 6/6、journey 25/25、拼音 7/7
