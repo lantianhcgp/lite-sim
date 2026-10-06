@@ -259,6 +259,29 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/logs":
             r = read_logs(int((q.get("lines") or ["200"])[0]), (q.get("filter") or [""])[0])
             return self._send(200, {"ok": True, "logs": r})
+        if u.path == "/api/res":
+            # 应用内静态资源（/common/image/…）：浏览器直连会 404，
+            # 由服务端读文件返回，模拟器里的 <image> 才能显示
+            proj = (q.get("project") or [""])[0]
+            rel = unquote((q.get("path") or [""])[0])
+            base = os.path.join(os.path.expanduser("~"), "hw_watch", proj,
+                                "entry/src/main/js/MainAbility")
+            fp = safe_path(os.path.join(base, rel)) if rel else None
+            if not fp or not os.path.isfile(fp) or not fp.startswith(os.path.realpath(base)):
+                return self._send(404, {"ok": False, "error": "资源不存在: " + rel})
+            ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                     ".webp": "image/webp", ".gif": "image/gif", ".svg": "image/svg+xml",
+                     ".json": "application/json", ".txt": "text/plain; charset=utf-8",
+                     ".css": "text/css", ".js": "application/javascript"}.get(
+                         os.path.splitext(fp)[1].lower(), "application/octet-stream")
+            data = open(fp, "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=60")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if u.path == "/api/source":
             # 给网页一次性拉取被调试项目的页面源码
             return self._send(200, self._source_bundle(q))

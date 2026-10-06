@@ -27,18 +27,22 @@ const KINDS = [
   { k: "data", label: "数据" },
   { k: "lifecycle", label: "生命周期" },
 ];
-let filter = { level: "", kind: "", q: "" };
+// 级别筛选模式：alarm=告警(error+warn，默认) / all / error / warn / info
+// 实测一次运行就有 200+ 条 info（PERF/API/EVT），默认告警视图避免刷屏淹没重点
+const LEVEL_MODES = { alarm: ["error", "warn"], all: "", error: "error", warn: "warn", info: "info" };
+let levelMode = "alarm";
+let filter = { level: LEVEL_MODES.alarm, kind: "", q: "" };
 
 function buildChips() {
   const box = $("#chips");
   box.innerHTML = "";
-  const lv = [["", "全部", ""], ["error", "错误", "e"], ["warn", "警告", "w"], ["info", "信息", "i"]];
+  const lv = [["alarm", "告警", "a"], ["all", "全部", ""], ["error", "错误", "e"],
+              ["warn", "警告", "w"], ["info", "信息", "i"]];
   for (const [val, label, cls] of lv) {
     const b = document.createElement("div");
-    b.className = "chip " + cls + (filter.level === val ? " on" : "");
-    const n = countLevel(val);
-    b.innerHTML = `${label}<span class="n">${n}</span>`;
-    b.onclick = () => { filter.level = val; buildChips(); renderList(); };
+    b.className = "chip " + cls + (levelMode === val ? " on" : "");
+    b.innerHTML = `${label}<span class="n">${countLevel(LEVEL_MODES[val])}</span>`;
+    b.onclick = () => { levelMode = val; filter.level = LEVEL_MODES[val]; buildChips(); renderList(); };
     box.appendChild(b);
   }
   for (const it of KINDS) {
@@ -51,6 +55,7 @@ function buildChips() {
 }
 function countLevel(lv) {
   if (!lv) return rep.issues.length;
+  if (Array.isArray(lv)) return rep.issues.filter(i => lv.includes(i.level)).length;
   return rep.issues.filter(i => i.level === lv).length;
 }
 
@@ -243,7 +248,7 @@ function runPage(rel) {
   }
 
   try {
-    currentPage = new Page(def, { name: rel, hml: f.hml, css: f.css, reporter: rep, mocks });
+    currentPage = new Page(def, { project: (source && source.project) || "", name: rel, hml: f.hml, css: f.css, reporter: rep, mocks });
     currentPage.mount(screen);
     $("#renderInfo").textContent = (currentPage.lastRenderMs || 0).toFixed(0) + "ms";
     // 持续跟踪渲染耗时
@@ -363,6 +368,7 @@ async function smoke() {
   const errList = rep.issues.filter(i => i.level === "error" && !i.code.startsWith("SMOKE"))
     .map(i => `${i.code}:${(i.title || "").slice(0, 46)}`);
   step("运行期无 error", errList.length === 0, errList.join(" | ") || "0 条");
+  levelMode = "all"; filter.level = LEVEL_MODES.all; buildChips(); renderList();
   rep.push({ kind: "lifecycle", level: "info", code: "SMOKE_DONE", title: "冒烟测试完成",
     message: `error ${rep.counts.error} / warn ${rep.counts.warn} / info ${rep.counts.info}`, hint: "",
     file: "", line: 0 });
@@ -516,6 +522,8 @@ async function journey() {
   const errs = rep.issues.filter(i => i.level === "error" && !i.code.startsWith("JRN") && !i.code.startsWith("SMOKE"))
     .map(i => `${i.code}:${(i.title || "").slice(0, 40)}`);
   step("全程 0 error", errs.length === 0, errs.join(" | ") || "0 条");
+  // 测试结果要可见：切回「全部」视图（默认是告警视图，会把通过的 info 步骤藏起来）
+  levelMode = "all"; filter.level = LEVEL_MODES.all; buildChips(); renderList();
   rep.push({ kind: "lifecycle", level: "info", code: "JRN_DONE", title: "旅程测试完成",
     message: `error=${rep.counts.error} warn=${rep.counts.warn} info=${rep.counts.info} 去重=${rep.stats().deduped}`,
     hint: "", file: "journey", line: 0 });

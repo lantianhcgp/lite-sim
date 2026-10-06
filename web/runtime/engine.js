@@ -302,6 +302,7 @@ export class Page {
     this.def = def;
     this.ctx = ctx;
     this.name = ctx.name;
+    this.project = ctx.project || "";       // 供 <image src="/common/…"> 转 /api/res
     this.rep = ctx.reporter;
     this.mocks = ctx.mocks;
     this.evalExpr = makeEvaluator(this.rep, this.name);
@@ -462,6 +463,23 @@ export class Page {
     const el = document.createElement(mapTag(node.tag));
     if (hideByShow) el.style.display = "none";   // Lite: show=false 仍构建节点但不显示
     this._applyAttrs(node, el, scope);
+
+    // <image src="/common/image/…"> 是 app 内资源路径，浏览器直连 404 → 转发 /api/res；
+    // 加载失败（文件名不存在等）时降级成占位块，不显示浏览器的坏图图标
+    if (node.tag === "image" || node.tag === "img") {
+      const raw = el.getAttribute("src") || "";
+      if (raw && raw.startsWith("/") && !raw.startsWith("//")) {
+        el.setAttribute("src",
+          "/api/res?project=" + encodeURIComponent(this.project) +
+          "&path=" + encodeURIComponent(raw.replace(/^\//, "")));
+      }
+      el.addEventListener("error", () => {
+        el.removeAttribute("src");
+        el.style.background = "#24262C";
+        el.style.border = "1px dashed #3A3F47";
+      }, { once: true });
+    }
+
     this._bindEvents(node, el, scope);
     domParent.appendChild(el);
     this._renderChildren(node, el, scope);

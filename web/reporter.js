@@ -205,7 +205,10 @@ export class Reporter {
   // ---------------------------------------------------------------- 查询
   filter({ level = "", kind = "", q = "", page = "" } = {}) {
     return this.issues.filter(it => {
-      if (level && it.level !== level) return false;
+      if (level) {
+        const ok = Array.isArray(level) ? level.includes(it.level) : it.level === level;
+        if (!ok) return false;
+      }
       if (kind && it.kind !== kind) return false;
       if (page && !(it.file || "").includes(page)) return false;
       if (q) {
