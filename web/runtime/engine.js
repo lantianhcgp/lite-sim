@@ -148,6 +148,7 @@ export function createSysMocks(reporter, opts = {}) {
   const timers = new Map();
   let timerId = 1;
 
+  const byteLen = v => { try { return new TextEncoder().encode(String(v == null ? "" : v)).length; } catch (e) { return String(v == null ? "" : v).length; } };
   const rec = (api, state, args, detail) => {
     const entry = { api, state, args, at: Date.now() };
     logs.push(entry);
@@ -169,7 +170,23 @@ export function createSysMocks(reporter, opts = {}) {
     }),
     storage: {
       get(o) { rec("storage.get", "call", o); const v = store.has(o.key) ? store.get(o.key) : (o.default || ""); setTimeout(() => o.success && o.success(v), 0); },
-      set(o) { rec("storage.set", "call", o); store.set(o.key, o.value); setTimeout(() => o.success && o.success(), 0); },
+      set(o) {
+        rec("storage.set", "call", { key: o.key, bytes: byteLen(o.value) });
+        // Lite 硬限制：storage 单值必须 <128B（超限真机会静默丢数据）
+        const n = byteLen(o.value);
+        if (n >= 128) {
+          rec("storage.set", "warn", { key: o.key, bytes: n }, { code: "STORAGE_OVERSIZE" });
+          reporter && reporter.push({
+            kind: "api", level: "error", code: "STORAGE_OVERSIZE",
+            title: `storage.${o.key} 写入 ${n}B，超过 128B 上限`,
+            message: "Lite 的 @system.storage 单值必须小于 128 字节，超限会写入失败或静默丢数据。",
+            hint: "大内容走 @system.file（internal://app/*.json），storage 只存开关/游标等小值",
+            file: "", line: 0, context: { key: o.key, bytes: n },
+          });
+        }
+        store.set(o.key, o.value);
+        setTimeout(() => o.success && o.success(), 0);
+      },
       delete(o) { rec("storage.delete", "call", o); store.delete(o.key); setTimeout(() => o.success && o.success(), 0); },
     },
     file: {

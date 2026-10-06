@@ -1,25 +1,14 @@
-feat: 浏览器端到端跑通（headless 冒烟 6/6，0 error）
+docs: README + storage 128B 红线 + MCP skill
 
-proot Chromium headless 实测验证：
-- 打开即自动加载 memo-todo + 体检 + 运行 index（零操作看到价值）
-- 画布完整渲染中文：待办 / 全部完成 / 还没有待办，点下方添加 /
-  长按事项可编辑/删除 / + 添加 / 备忘
-- ?smoke=1 一键冒烟 6/6 通过：体检 → index 渲染 → 点「+ 添加」
-  → router 跳转 → edit 渲染 → 系统返回 onBackPress → 回 index，全程 0 error
+- README.md：启动方式、能查/不能查的边界、三部分说明、MCP 工具表、
+  测试命令、冒烟步骤、目录结构、已知边界
+- storage.set 加 128B 硬限制检查（超限报 STORAGE_OVERSIZE +
+  指向 @system.file 的修复建议）
+- 新建 skill `lite-sim-mcp`：连接四要素、8 工具、典型工作流、
+  headless 冒烟命令、7 条实测坑
 
-headless 实测发现并修复的 4 个真 bug：
-1. 标签解析在引号内 > 处提前截断 —— `if="{{ pending > 0 }}"` 的 >
-   使属性残缺、`}}">` 泄漏进可见文本 → 新增 findTagEnd 跳过引号
-2. 属性值 `{{ expr }}` 直接传给求值器没剥花括号 → EXPR_COMPILE 全挂，
-   if/for 失效列表不渲染 → evalExpr/_evalFor 入口统一剥外层 {{}}
-3. HTML 实体未解码 → 画布显示字面量 `&#x5F85;&#x529E;` → 新增 decodeEntities
-4. 默认导入没取 .default → `import fs from 'common/fs'` 拿到 {default:cls}，
-   fs.readLargeFile undefined
-
-新增：
-- 系统返回键（按钮触发 onBackPress）—— 编辑页无返回按钮，走系统手势语义
-- 页面跳转联动：源码里 router.push/replace/back 会真的切到目标页
-- file 301（文件不存在）降为 warn 并提示「首次使用属正常，走默认值路径」
-- 冒烟选择器改用 .nav-btn（空态文案「点下方添加」含"添加"，按文本匹配会点错）
-
-测试：test-checker 30/30、test-moduleloader 9/9、headless 冒烟 6/6
+最终回归（全绿）：
+  规则体检 30/30 · 模块加载 9/9
+  服务端 health ✓ / MCP sim_status ✓（日志 177 条）/ 静态页 200
+  项目自动发现 6 个：clan elcton elcton-repo lite-watch-starter memo-todo nexuscheckin
+  headless 冒烟 6/6，0 错误 / 5 警告 / 49 信息
