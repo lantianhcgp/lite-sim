@@ -34,7 +34,7 @@ function stripComments(src) {
 // 遍历 hml 开标签（跳过注释/文本）
 function eachOpenTag(hml, cb) {
   const s = stripComments(hml);
-  const re = /<(\w+)((?:[^>"]|"[^"]*")*)>/g;
+  const re = /<([\w-]+)((?:[^>"]|"[^"]*")*)>/g;   // 必须含 -：picker-view/list-item/tab-bar
   let m;
   while ((m = re.exec(s)) !== null) {
     const tag = m[1], attrs = m[2];
@@ -298,9 +298,14 @@ function checkJs(rel, js, out, handlers) {
   }));
 
   // 正则字面量（JerryScript 构建 profile 关闭正则字面量支持）
+  // 注意：必须先把字符串字面量挖成空串 —— 否则 `= 'a|/xxx/|b'` 这类
+  // 字符串里的竖线+斜杠组合会被当成正则（nexuscheckin 的词典串实测误报）
+  const jsNoStr = js.replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+                     .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+                     .replace(/`(?:[^`\\]|\\.)*`/g, "``");
   const regRe = /(^|[=(:,!&|?{}\[])\s*\/(?![/*])(?:[^/\\\n\[]|\\.|\[(?:[^\]\\]|\\.)*\])+\/[gimsuy]*/gm;
   let rm;
-  while ((rm = regRe.exec(js)) !== null) {
+  while ((rm = regRe.exec(jsNoStr)) !== null) {
     const line = lineOf(js, rm.index);
     const text = lineText(js, line);
     if (/^\s*(\/\/|\*)/.test(text)) continue; // 注释里的

@@ -535,9 +535,12 @@ window.addEventListener("unhandledrejection", e => {
   const qs = new URLSearchParams(location.search);
   if (qs.get("shot")) document.body.classList.add("shot");   // 纯画布截图模式
   const names = await listProjects();
+  const wantProject = qs.get("project");   // ?project=elcton 指定被测工程
   const sel = $("#project");
-  sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join("");
-  sel.value = names.includes("memo-todo") ? "memo-todo" : names[0];
+  const initial = (wantProject && names.includes(wantProject)) ? wantProject : names[0];
+  sel.innerHTML = names.map(n => `<option value="${n}"${n === initial ? " selected" : ""}>${n}</option>`).join("");
+  // 只有 URL 没指定 ?project= 时才回落到默认工程（否则会覆盖掉参数）
+  if (!wantProject) sel.value = names.includes("memo-todo") ? "memo-todo" : names[0];
   await loadProject();
   buildPageButtons();
   renderCounts(); buildChips(); renderList(); renderLog();

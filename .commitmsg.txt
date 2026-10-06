@@ -1,25 +1,32 @@
-fix: 对齐真机观感（字体栈 + 圆角外白底）+ 逐项像素比对
+feat: 用 5 个第三方工程压测，修 4 个兼容缺口 + 甄别规则误报
 
-用户反馈「渲染出来的页面和真机不一样」，与真实手表截图逐项像素比对后定位：
+用户要求拿别人发的源码上测试。新增 scripts/test-all-projects.mjs 遍历
+~/hw_watch 下全部 Lite 工程跑「规则体检 + 模块加载」，暴露 4 个模拟器缺口：
 
-1. 圆角外底色错误（主要视觉差异）
-   真机截图圆角外是纯白：y00-04 整行 412 全白，y5..74 白区沿两侧
-   收缩 (0,81)→(0,7)/(330,411)→(404,411)，按圆心(100,100) 拟合
-   正好是 R≈100 的圆弧 —— 黑底上圆角轮廓直接隐形。
-   → #frameWrap / body.shot #stage / body.shot 设 #fff
+1. `@ohos.*` 导入不支持（clan / elcton-repo / lite-watch-starter 共 3 项目在用）
+   → moduleloader 增加 @ohos.* → 同名 mock（router/file/storage…），与 @system.* 同语义
+2. tag 解析用 `\w+` 在连字符处截断：`picker-view` 被当成 `picker` → 白名单查不到 →
+   误报 HML_UNKNOWN_TAG（且连带 list-item 子节点计数错）→ 正则改 `[\w-]+`
+3. 正则字面量检测把字符串当正则：nexuscheckin 的词典串 `'...|/sept/|...'` 被报
+   JS_REGEX_LITERAL → 检测前先剥离 '…' "…" `…` 字符串字面量
+4. 没实现 `$refs`：elcton `self.$refs.courseList` 直接 TypeError（真机框架注入）→
+   Page 增加 $refs（收集 hml 的 ref 属性 → 模拟组件实例，scrollTo 等记录并可用）
 
-2. 字体不是真机的 HYQiHei-65S
-   → 画布内字体栈：HYQiHei-65S → Noto Sans CJK SC（headless 实测存在，
-     最接近方正黑体）→ WenQuanYi Zen Hei → sans-serif
+其他：
+- ?project=elcton 指定被测工程（原来第 9 行强制回落 memo-todo 把参数覆盖掉）
+- 测试脚本改用真实 createSysMocks（简陋 Proxy 缺 $app，会让 memo-todo 假失败）
 
-逐项复测（固定窗口 x80..112，避开圆角白边）：
-  标题「待办」   真机 y36..64(高29)  模拟 y36..65(高30)   ✓ 一致
-  计数区         真机 y15..59        模拟 y15..58          ✓ 一致
-  卡片背景       源码 #111318        渲染 #111318          ✓ 一致
-                 真机采样 #111016（JPEG 色偏，非渲染差异）
-  按钮背景       源码 #1F71FF        渲染 #1F71FF          ✓ 一致
-  卡片顶 y       真机 91             模拟 89               （2px）
-  标题 x 范围    真机 x60..103       模拟 x60..102         ✓ 一致
+测得结果（6 工程 27 页，加载失败 0）：
+  clan 2✓  elcton 5✓  elcton-repo 5✓  lite-watch-starter 5✓
+  memo-todo 4✓  nexuscheckin 6✓（含 67 字段 data 的复杂页）
+headless 真渲染：
+  elcton → 「周二 10月6日 第6周 线性代数 陈教授 14:00-15:40 周视图」
+  nexuscheckin → 「用户，早上好！每日签到 尚未绑定 Token 立即签到 幸运大转盘」
 
-结论：位置/尺寸/配色已对齐；剩余差异只有字体形状本身
-（HYQiHei 无法获取，回退 Noto Sans CJK SC）与数据空态。
+规则抽样验证（4 项全部为真问题，非误报）：
+  HML_LIST_ITEM_MULTI_CHILD ×14 —— <list-item> 里同时放 <text>+<input>（Lite 只准 1 子节点）
+  EVT_INERT_PREFIX —— detail.hml:1 用了 on:swipe，真机完全不注册
+  DATA_BAD_NAME —— add-course.js:20 data._loaded 以 _ 开头
+  HML_BARE_CN ×98 —— <text>今日黄历</text> 裸中文，Lite 要求 HTML 实体
+
+回归：checker 30/30、moduleloader 9/9、journey 25/25

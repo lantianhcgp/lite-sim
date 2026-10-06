@@ -308,6 +308,18 @@ export class Page {
     this.container = null;
     this.renderQueued = false;
     this.destroyed = false;
+    // $refs：hml 里 ref="xxx" → this.$refs.xxx（Lite 框架注入）。缺它会在
+    // `self.$refs.courseList` 直接崩 —— elcton 实测 TypeError，非被测代码 bug
+    this._refEls = new Map();
+    const self = this;
+    this.$refs = new Proxy({}, {
+      get(_, k) {
+        if (typeof k === "symbol" || k === "then") return undefined;
+        const el = self._refEls.get(String(k));
+        if (!el) return makeRefProxy(String(k), self, null);
+        return makeRefProxy(String(k), self, el);
+      },
+    });
     this.fireCounts = new Map();   // 事件重复触发计数
 
     // ---- 方法挂载
@@ -497,6 +509,11 @@ export class Page {
 
   _applyAttrs(node, el, scope) {
     const a = node.attrs || {};
+    // 收集 ref="xxx" → $refs（Lite 的 ref 由框架注入到 this.$refs）
+    if (a.ref !== undefined && a.ref !== true) {
+      const nm = String(a.ref).replace(/[{}"]/g, "").trim();
+      if (nm) this._refEls.set(nm, el);
+    }
     const cls = [], style = [];
     for (const k of Object.keys(a)) {
       const v = a[k];
@@ -632,6 +649,23 @@ export class Page {
 // ================================================================ 工具
 // Lite 中默认按 flex 布局的容器（浏览器默认是 block，必须显式补）
 const LITE_FLEX_TAGS = new Set(["div", "stack", "list", "list-item", "tabs", "tab-content", "swiper"]);
+
+// $refs.xxx 的模拟组件实例：记录方法调用；scrollTo 等做可行实现，其余只记日志
+function makeRefProxy(name, page, el) {
+  const rec = (m, args) => page.rep && page.rep.api(`$refs.${name}.${m}`, args, "ok");
+  return new Proxy({}, {
+    get(_, k) {
+      if (typeof k === "symbol") return undefined;
+      if (k === "scrollTo") return (o) => { rec("scrollTo", o); };       // list 滚动
+      if (k === "scrollIndex") return 0;
+      if (k === "offset") return { x: 0, y: 0 };
+      if (k === "id") return name;
+      // 其他方法：记录并返回 undefined（调用方一般有 if 判空）
+      return (...args) => { rec(String(k), args); return undefined; };
+    },
+    has: () => true,
+  });
+}
 
 function mapTag(tag) {
   switch (tag) {

@@ -64,6 +64,14 @@ export class ModuleLoader {
     const unwrapDefault = (m) => (m && typeof m === "object" && m.default !== undefined && Object.keys(m).length <= 2) ? m.default : m;
     const loadFn = (spec) => {
       const target = this._resolve(rel, spec);
+      // @ohos.* 是另一套系统导入写法（clan / elcton-repo / lite-watch-starter 在用），
+      // 语义与 @system.* 相同：router → mock.router、file → mock.file …
+      if (spec.startsWith("@ohos.")) {
+        const name = spec.slice(6);
+        if (name === "router") return this.mocks.router || { default: {} };
+        if (this.mocks && this.mocks[name]) return this.mocks[name];
+        throw new Error(`@ohos.${name} 未提供 mock（模拟器不支持该 API）`);
+      }
       if (spec.startsWith("@system.")) {
         const name = spec.slice(8);
         if (!this.mocks || !this.mocks[name]) {
