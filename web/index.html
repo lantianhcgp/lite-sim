@@ -34,10 +34,16 @@ main{flex:1;display:flex;min-height:0}
 /* 左：画布 */
 #stage{flex:0 0 auto;padding:14px;overflow:auto;border-right:1px solid var(--line);
   display:flex;flex-direction:column;gap:10px;align-items:center}
-#frameWrap{position:relative}
+#frameWrap{position:relative;background:#fff}
+/* 真机截图里圆角外是白底（R≈100 弧线外纯白），模拟器必须一致，否则圆角轮廓隐形 */
 #frame{width:412px;height:484px;background:#000;border-radius:100px;overflow:hidden;
   position:relative;box-shadow:0 0 0 8px #1a1d23,0 18px 48px rgba(0,0,0,.6)}
 #frame *{-webkit-font-smoothing:antialiased}
+/* 模拟 Lite 真机字体：真机只允许 HYQiHei-65S（方正黑体类）。
+   浏览器没有该字体时逐级回退到形态最接近的黑体，避免系统默认字体造成观感偏差。 */
+#frame,#frame *{
+  font-family:"HYQiHei-65S","Noto Sans CJK SC","WenQuanYi Zen Hei","sans-serif"!important;
+}
 #screen{position:absolute;inset:0;overflow:hidden}
 .danger-line{position:absolute;left:0;right:0;top:420px;height:1px;
   background:repeating-linear-gradient(90deg,rgba(255,90,95,.55) 0 8px,transparent 8px 16px);
@@ -113,12 +119,12 @@ footer{display:flex;gap:10px;align-items:center;padding:7px 12px;border-top:1px 
 .toast.show{opacity:1}
 
 /* ?shot=1 纯画布模式：视口设为 412x484 截图，用于和真实表盘截图做视觉对比 */
-body.shot{background:#000;overflow:hidden}
+body.shot{background:#fff;overflow:hidden}
 body.shot header,body.shot #side,body.shot footer,
 body.shot #stageBar,body.shot #pages,body.shot #btnSysBack,
 body.shot #gridLine,body.shot .toast{display:none!important}
 body.shot main{display:block;height:100%}
-body.shot #stage{padding:0;border:0;overflow:visible;width:412px;height:484px;gap:0}
+body.shot #stage{padding:0;border:0;overflow:visible;width:412px;height:484px;gap:0;background:#fff}
 body.shot #frameWrap{position:static}
 body.shot #frame{width:412px;height:484px;border-radius:100px;box-shadow:none;margin:0}
 </style>
