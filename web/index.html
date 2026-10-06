@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>lite-sim · Lite Wearable 模拟器</title>
+<style>
+:root{
+  --bg:#0a0b0d; --panel:#111318; --panel2:#16191f; --line:#22262e;
+  --fg:#e6e8eb; --dim:#8a93a6; --dim2:#5c6470;
+  --err:#ff5a5f; --warn:#f5a524; --ok:#3ecf8e; --info:#5b9dff; --blue:#1f71ff;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+  font:14px/1.5 -apple-system,"PingFang SC","HarmonyOS Sans SC",Roboto,sans-serif}
+button{font:inherit;color:inherit;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:7px 12px;cursor:pointer}
+button:hover{border-color:#333a45;background:#1b1f27}
+button.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+button.ghost{background:transparent}
+input,select{font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:7px 10px;outline:none}
+input:focus,select:focus{border-color:var(--blue)}
+code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+
+#app{display:flex;flex-direction:column;height:100%}
+header{display:flex;gap:8px;align-items:center;padding:10px 12px;
+  border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+header .logo{font-weight:700;letter-spacing:.3px}
+header .logo small{color:var(--dim);font-weight:400;margin-left:6px}
+.spacer{flex:1}
+
+main{flex:1;display:flex;min-height:0}
+/* 左：画布 */
+#stage{flex:0 0 auto;padding:14px;overflow:auto;border-right:1px solid var(--line);
+  display:flex;flex-direction:column;gap:10px;align-items:center}
+#frameWrap{position:relative}
+#frame{width:412px;height:484px;background:#000;border-radius:100px;overflow:hidden;
+  position:relative;box-shadow:0 0 0 8px #1a1d23,0 18px 48px rgba(0,0,0,.6)}
+#frame *{-webkit-font-smoothing:antialiased}
+#screen{position:absolute;inset:0;overflow:hidden}
+.danger-line{position:absolute;left:0;right:0;top:420px;height:1px;
+  background:repeating-linear-gradient(90deg,rgba(255,90,95,.55) 0 8px,transparent 8px 16px);
+  pointer-events:none;z-index:999}
+.danger-line::after{content:"y=420 圆角危险区";position:absolute;right:6px;top:-14px;
+  font-size:9px;color:rgba(255,90,95,.75)}
+.grid-line{position:absolute;inset:0;pointer-events:none;z-index:998;
+  background:linear-gradient(rgba(255,255,255,.045) 1px,transparent 1px) 0 0/100% 60px}
+#stageBar{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--dim);width:412px}
+#pages{display:flex;gap:6px;flex-wrap:wrap;width:412px}
+#pages button{padding:5px 9px;font-size:12px}
+#pages button.on{border-color:var(--blue);color:#fff;background:rgba(31,113,255,.16)}
+
+/* 右：报错面板 */
+#side{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel)}
+#sideTop{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;
+  flex-wrap:wrap;align-items:center}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:12px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;
+  background:var(--panel2);cursor:pointer;color:var(--dim)}
+.chip.on{color:#fff;border-color:#3a4150;background:#20242c}
+.chip .n{font-weight:700;margin-left:5px}
+.chip.e .n{color:var(--err)} .chip.w .n{color:var(--warn)} .chip.i .n{color:var(--info)}
+#counts{display:flex;gap:12px;font-size:12px;color:var(--dim)}
+#counts b{font-size:15px}
+#counts .e b{color:var(--err)} #counts .w b{color:var(--warn)} #counts .i b{color:var(--info)}
+
+#list{flex:1;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
+.card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+  padding:9px 11px;border-left-width:3px}
+.card.error{border-left-color:var(--err)} .card.warn{border-left-color:var(--warn)}
+.card.info{border-left-color:var(--info)}
+.card .row1{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.lvl{font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;letter-spacing:.5px}
+.card.error .lvl{background:rgba(255,90,95,.15);color:var(--err)}
+.card.warn .lvl{background:rgba(245,165,36,.15);color:var(--warn)}
+.card.info .lvl{background:rgba(91,157,255,.14);color:var(--info)}
+.code{font-size:11px;color:var(--dim2);font-family:ui-monospace,monospace}
+.card .title{font-weight:600;font-size:13.5px;flex:1;min-width:0;word-break:break-word}
+.card .loc{font-size:11px;color:var(--dim);font-family:ui-monospace,monospace}
+.card .msg{margin-top:6px;font-size:12.5px;color:#b7bec9;word-break:break-word;white-space:pre-wrap}
+.card .hint{margin-top:7px;font-size:12.5px;background:rgba(62,207,142,.08);
+  border:1px solid rgba(62,207,142,.22);border-radius:7px;padding:7px 9px;color:#9fe3c4}
+.card .hint::before{content:"怎么改  ";color:var(--ok);font-weight:700}
+.card .src{margin-top:7px;background:#0c0e11;border:1px solid var(--line);border-radius:7px;
+  padding:7px 9px;font-family:ui-monospace,monospace;font-size:11.5px;color:#c9d1dc;
+  white-space:pre-wrap;overflow-x:auto}
+.card .ctx{margin-top:7px;font-size:11.5px;color:var(--dim);font-family:ui-monospace,monospace;
+  white-space:pre-wrap;max-height:180px;overflow:auto}
+.card .acts{margin-top:8px;display:flex;gap:6px}
+.card .acts button{font-size:11.5px;padding:4px 9px}
+.empty{color:var(--dim);text-align:center;padding:40px 16px;line-height:1.9}
+.empty b{color:var(--ok)}
+
+#log{height:150px;overflow:auto;border-top:1px solid var(--line);background:#0c0e11;
+  padding:7px 10px;font-family:ui-monospace,monospace;font-size:11.5px;color:#98a2b0}
+#log .l{padding:1px 0;white-space:pre-wrap;word-break:break-all}
+#log .l.error{color:#ff8b8f} #log .l.warn{color:#f0c674} #log .l.info{color:#7aa2f7}
+#log .t{color:#4b5261;margin-right:7px}
+footer{display:flex;gap:10px;align-items:center;padding:7px 12px;border-top:1px solid var(--line);
+  background:var(--panel);font-size:12px;color:var(--dim);flex-wrap:wrap}
+#upState.ok{color:var(--ok)} #upState.err{color:var(--err)}
+
+@media (max-width:900px){
+  main{flex-direction:column}
+  #stage{border-right:none;border-bottom:1px solid var(--line);padding:10px}
+  #frame{width:100%;max-width:412px;transform-origin:top center}
+}
+.toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:#20242c;
+  border:1px solid var(--line);border-radius:9px;padding:9px 16px;font-size:13px;z-index:9999;
+  opacity:0;transition:opacity .2s}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">lite-sim<small>Lite Wearable 模拟器</small></div>
+    <select id="project" title="被调试项目"></select>
+    <button id="btnReload" class="ghost">重新加载</button>
+    <button id="btnCheck" class="primary">规则体检</button>
+    <div class="spacer"></div>
+    <button id="btnRun" class="ghost">▶ 运行</button>
+    <button id="btnReset" class="ghost">重置页面</button>
+  </header>
+
+  <main>
+    <section id="stage">
+      <div id="stageBar">
+        <span>412 × 484</span><span>·</span><span>圆角 R≈100</span>
+        <span class="spacer" style="flex:1"></span>
+        <label><input type="checkbox" id="chkGrid" checked> 网格</label>
+        <label><input type="checkbox" id="chkDanger" checked> 危险区</label>
+      </div>
+      <div id="frameWrap">
+        <div id="frame">
+          <div class="grid-line" id="gridLine"></div>
+          <div id="screen"></div>
+          <div class="danger-line" id="dangerLine"></div>
+        </div>
+      </div>
+      <div id="pages"></div>
+    </section>
+
+    <section id="side">
+      <div id="sideTop">
+        <div class="chips" id="chips"></div>
+        <div class="spacer" style="flex:1"></div>
+        <input id="q" placeholder="搜索 code / 文件 / 关键词" style="width:170px">
+        <button id="btnCopy" class="ghost">复制报告</button>
+        <button id="btnClear" class="ghost">清空</button>
+      </div>
+      <div id="counts"></div>
+      <div id="list"></div>
+      <div id="log"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span>项目 <b id="projInfo">—</b></span>
+    <span>文件 <b id="fileInfo">—</b></span>
+    <span>最近渲染 <b id="renderInfo">—</b></span>
+    <div class="spacer"></div>
+    <span id="upState">上报: —</span>
+  </footer>
+</div>
+<div class="toast" id="toast"></div>
+<script type="module" src="/web/app.js"></script>
+</body>
+</html>

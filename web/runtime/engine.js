@@ -1,0 +1,568 @@
+// lite-sim 运行时引擎 —— HML 解析 / 响应式绑定 / 渲染 / 事件 / 生命周期
+// 设计原则：宁可严格报错，也不静默失败（真机最坑的就是静默）。
+
+// ================================================================ HML 解析
+const VOID_LIKE = new Set(["input", "img", "progress"]);
+
+export function parseHml(src) {
+  const s = src.replace(/<!--[\s\S]*?-->/g, "");
+  const root = { tag: "#root", attrs: {}, children: [], text: "" };
+  const stack = [root];
+  let i = 0;
+  while (i < s.length) {
+    const lt = s.indexOf("<", i);
+    if (lt < 0) { pushText(s.slice(i)); break; }
+    if (lt > i) pushText(s.slice(i, lt));
+    if (s.startsWith("</", lt)) {
+      const gt = s.indexOf(">", lt);
+      const tag = s.slice(lt + 2, gt).trim();
+      for (let k = stack.length - 1; k > 0; k--) {
+        if (stack[k].tag === tag) { stack.length = k; break; }
+      }
+      i = gt + 1;
+      continue;
+    }
+    const gt = s.indexOf(">", lt);
+    if (gt < 0) break;
+    const raw = s.slice(lt + 1, gt);
+    const selfClose = raw.trim().endsWith("/");
+    const body = selfClose ? raw.trim().slice(0, -1) : raw;
+    const tm = /^\s*([A-Za-z][\w-]*)/.exec(body);
+    if (!tm) { i = gt + 1; continue; }
+    const tag = tm[1];
+    const node = { tag, attrs: parseAttrs(body.slice(tm[0].length)), children: [], text: "" };
+    stack[stack.length - 1].children.push(node);
+    if (!selfClose && !VOID_LIKE.has(tag)) stack.push(node);
+    i = gt + 1;
+  }
+  function pushText(t) {
+    if (!t.trim()) return;
+    // {{ ... }} 提取为文本片段
+    const node = { tag: "#text", attrs: {}, children: [], text: t, expr: extractExpr(t) };
+    stack[stack.length - 1].children.push(node);
+  }
+  return root;
+}
+
+function parseAttrs(s) {
+  const out = {};
+  const re = /([\w:@.-]+)\s*=\s*"([^"]*)"/g;
+  let m;
+  while ((m = re.exec(s)) !== null) out[m[1]] = m[2];
+  // 无值布尔属性
+  const re2 = /(?:^|\s)([a-zA-Z][\w-]*)(?=\s|$)/g;
+  while ((m = re2.exec(s)) !== null) if (!(m[1] in out)) out[m[1]] = true;
+  return out;
+}
+
+function extractExpr(text) {
+  // 整段就是 {{ expr }} → 返回 expr（纯绑定）
+  const whole = /^\s*\{\{([\s\S]*?)\}\}\s*$/.exec(text);
+  if (whole) return { whole: whole[1].trim() };
+  // 混合文本 → 分段
+  const parts = [];
+  const re = /\{\{([\s\S]*?)\}\}/g;
+  let m, last = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push({ lit: text.slice(last, m.index) });
+    parts.push({ expr: m[1].trim() });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push({ lit: text.slice(last) });
+  return { parts };
+}
+
+// ================================================================ 表达式求值
+// Lite 的 hml 表达式只支持 ES5；这里同样不提供 ES6 能力，跑出错就报错。
+export function makeEvaluator(reporter, pageName) {
+  const cache = new Map();
+  return function evalExpr(expr, scope) {
+    let fn = cache.get(expr);
+    if (!fn) {
+      try {
+        // with + new Function：让 {{ typeData }} 直接命中 data 字段（Lite 同语义）
+        fn = new Function("d", `with(d){return (${expr});}`);
+        cache.set(expr, fn);
+      } catch (e) {
+        reporter && reporter.push({
+          kind: "rule", level: "error", code: "EXPR_COMPILE",
+          title: `表达式编译失败: {{ ${expr} }}`,
+          message: String(e.message), file: pageName,
+          hint: "Lite hml 表达式只支持 ES5：不能有箭头函数/模板字符串/let/解构，复杂逻辑移入 .js",
+        });
+        cache.set(expr, null);
+        return undefined;
+      }
+    }
+    if (!fn) return undefined;
+    try {
+      return fn.call(scope, scope);
+    } catch (e) {
+      reporter && reporter.exception(e, { page: pageName, event: "表达式求值", source: `{{ ${expr} }}` });
+      return undefined;
+    }
+  };
+}
+
+function truthy(v) {
+  if (Array.isArray(v)) return v.length > 0;
+  return v !== undefined && v !== null && v !== false && v !== "" && v !== 0;
+}
+
+// ================================================================ @system mock
+export function createSysMocks(reporter) {
+  const logs = [];
+  const store = new Map();
+  const files = new Map();      // uri -> text
+  const routerStack = ["pages/index/index"];
+  const timers = new Map();
+  let timerId = 1;
+
+  const rec = (api, state, args, detail) => {
+    const entry = { api, state, args, at: Date.now() };
+    logs.push(entry);
+    if (logs.length > 400) logs.shift();
+    reporter && reporter.api(api, args, state, detail);
+  };
+
+  // 路由参数仓（system_router.getParams 的返回）
+  let routeParams = null;
+  const def = o => { o.default = o; return o; };   // 支持 import * as x → x.default.y
+
+  const mock = {
+    router: def({
+      push(o) { rec("router.push", "call", o); routerStack.push(o && o.uri); routeParams = (o && o.params) || null; },
+      replace(o) { rec("router.replace", "call", o); if (o && o.uri) routerStack[routerStack.length - 1] = o.uri; routeParams = (o && o.params) || routeParams; },
+      back() { rec("router.back", "call", null); if (routerStack.length > 1) routerStack.pop(); routeParams = null; },
+      getParams() { rec("router.getParams", "call", routeParams); return routeParams; },
+      getState() { return { stack: routerStack.slice() }; },
+    }),
+    storage: {
+      get(o) { rec("storage.get", "call", o); const v = store.has(o.key) ? store.get(o.key) : (o.default || ""); setTimeout(() => o.success && o.success(v), 0); },
+      set(o) { rec("storage.set", "call", o); store.set(o.key, o.value); setTimeout(() => o.success && o.success(), 0); },
+      delete(o) { rec("storage.delete", "call", o); store.delete(o.key); setTimeout(() => o.success && o.success(), 0); },
+    },
+    file: {
+      get(o) { rec("file.get", "call", { uri: o.uri }); simRead({ uri: o.uri, success: o.success, fail: o.fail }); },
+      readText(o) { rec("file.readText", "call", { uri: o.uri, position: o.position }); simRead(o); },
+      writeText(o) { rec("file.writeText", "call", { uri: o.uri, len: (o.text || "").length }); files.set(o.uri, (o.text || "")); setTimeout(() => o.success && o.success(), 0); },
+      access(o) { const ok = files.has(o.uri); rec("file.access", ok ? "ok" : "fail", { uri: o.uri, code: ok ? 0 : 301 }); setTimeout(() => ok ? (o.success && o.success()) : (o.fail && o.fail({}, 301)), 0); },
+      list(o) { rec("file.list", "call", o); setTimeout(() => o.success && o.success({ fileList: [] }), 0); },
+    },
+    vibrator: { vibrate(o) { rec("vibrator", "call", o); } },
+    brightness: { setKeepScreenOn(o) { rec("brightness.setKeepScreenOn", "call", o); } },
+    app: { getInfo(o) { rec("app.getInfo", "call", o); setTimeout(() => o.success && o.success({ appName: "lite-sim", versionName: "0.1.0" }), 0); } },
+    sensor: {},
+  };
+
+  function simRead(o) {
+    // 分块读，与真机一致（fs.readAll 递归取 CHUNK）
+    const full = files.has(o.uri) ? files.get(o.uri) : null;
+    if (full === null) {
+      const code = 301;
+      setTimeout(() => { rec("file.readText", "fail", { uri: o.uri }, { code }); o.fail && o.fail({}, code); }, 0);
+      return;
+    }
+    const pos = o.position || 0, len = o.length || full.length;
+    const chunk = full.slice(pos, pos + len);
+    setTimeout(() => { o.success && o.success({ text: chunk, offset: pos, remaining: Math.max(0, full.length - pos - chunk.length) }); }, 0);
+  }
+
+  function timerWrap(kind, fn, ms) {
+    const id = timerId++;
+    rec(kind, "call", { ms });
+    const handle = setTimeout(() => { timers.delete(id); try { fn(); } catch (e) { reporter && reporter.exception(e, { event: kind }); } }, ms);
+    timers.set(id, { handle, kind });
+    return id;
+  }
+
+  // ---- $app 全局对象（Lite 运行时提供，common/router 直接裸用）
+  let paramStore = {}, dataStore = {};
+  const appGlobal = {
+    addAllParams(o) { rec("app.addAllParams", "call", o); Object.assign(paramStore, o || {}); },
+    getAllParams(cb) { rec("app.getAllParams", "call", null); cb && cb(Object.assign({}, paramStore)); },
+    cleanAllParams() { rec("app.cleanAllParams", "call", null); paramStore = {}; },
+    getData(cb) { rec("app.getData", "call", null); cb && cb(Object.assign({}, dataStore)); },
+    cleanData() { rec("app.cleanData", "call", null); dataStore = {}; },
+    setData(o) { Object.assign(dataStore, o || {}); },
+    getCurrentUri(cb) { cb && cb(routerStack[routerStack.length - 1] || ""); },
+    getRouterUriList(cb) { cb && cb(routerStack.slice()); },
+    writeRouterUriList(list) { routerStack.length = 0; for (const u of (list || [])) routerStack.push(u); },
+    onPageChange(uri) { rec("app.onPageChange", "call", { uri }); },
+  };
+  // Lite 中 $app 是全局变量（router.js 用 try{ var g=$app }catch{} 后直接调用）
+  try { globalThis.$app = appGlobal; } catch (e) { /* 非浏览器环境忽略 */ }
+
+  // Proxy 兜底：任何未实现的方法都记录调用并尝试回调，避免"缺方法"阻塞加载
+  const withFallback = (api, apiName) => new Proxy(api, {
+    get(t, k) {
+      if (k in t) return t[k];
+      if (typeof k === "symbol" || k === "then" || k === "catch" || k === "toJSON" || k === "constructor") return t[k];
+      return (...args) => {
+        const m = `${apiName}.${String(k)}`;
+        const first = args[0];
+        const isCb = first && typeof first === "object";
+        rec(m, "call", isCb ? { uri: first.uri, key: first.key } : args);
+        if (isCb && typeof first.success === "function") {
+          setTimeout(() => first.success({ text: "", fileList: [], offset: 0, remaining: 0, data: "" }), 0);
+        }
+        return undefined;
+      };
+    },
+  });
+  for (const k of Object.keys(mock)) {
+    if (mock[k] && typeof mock[k] === "object") mock[k] = withFallback(mock[k], k);
+  }
+
+  // 顶层直接铺开 API（moduleloader 用 mocks[name] 取），同时保留诊断辅助
+  return Object.assign({}, mock, {
+    mock, logs, files, store, routerStack, appGlobal,
+    routeParamsGet: () => routeParams,
+    timers,
+    setTimeout: (fn, ms) => timerWrap("setTimeout", fn, ms),
+    clearInterval: id => { const rec2 = timers.get(id); if (rec2) { clearTimeout(rec2.handle); timers.delete(id); rec("clearInterval", "call", { id }); } },
+    clearTimeout: id => { const rec2 = timers.get(id); if (rec2) { clearTimeout(rec2.handle); timers.delete(id); } },
+    clearAll: () => { for (const [, tv] of timers) clearTimeout(tv.handle); timers.clear(); },
+    seedFiles: obj => { for (const k in obj) files.set(k, obj[k]); },
+    params: { set: (o) => appGlobal.setData(o) },
+  });
+}
+
+// ================================================================ 页面实例
+const DOM_EVENTS = { click: "click", longpress: "contextmenu", swipe: "touchstart", touchstart: "touchstart", touchend: "touchend", change: "change" };
+
+export class Page {
+  /**
+   * @param def    export default { data, onInit, methods... }
+   * @param ctx    { name, reporter, mocks, files, project }
+   */
+  constructor(def, ctx) {
+    this.def = def;
+    this.ctx = ctx;
+    this.name = ctx.name;
+    this.rep = ctx.reporter;
+    this.mocks = ctx.mocks;
+    this.evalExpr = makeEvaluator(this.rep, this.name);
+    this.container = null;
+    this.renderQueued = false;
+    this.destroyed = false;
+    this.fireCounts = new Map();   // 事件重复触发计数
+
+    // ---- 方法挂载
+    for (const k of Object.keys(def)) {
+      if (typeof def[k] === "function" && k !== "data") this[k] = def[k].bind(this);
+    }
+    // ---- data 响应式（直接挂在 this，与 Lite 同语义）
+    const raw = Object.assign({}, def.data || {});
+    this._raw = raw;
+    for (const k of Object.keys(raw)) this._define(k);
+    this._reactivate(raw);
+  }
+
+  _define(k) {
+    const self = this;
+    Object.defineProperty(this, k, {
+      configurable: true,
+      enumerable: true,
+      get() { return self._raw[k]; },
+      set(v) {
+        const before = self._raw[k];
+        self._raw[k] = v;
+        self.rep && self.rep.dataChange(`${self.name}.${k}`, before, v, "赋值");
+        self.scheduleRender();
+      },
+    });
+  }
+
+  // 深度响应式：嵌套对象的属性修改也能触发渲染（治"改了不显示"）
+  _reactivate(obj) {
+    if (!obj || typeof obj !== "object") return;
+    const self = this;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        obj[k] = new Proxy(v, {
+          get(t, p) { const rv = t[p]; return (rv && typeof rv === "object" && !Array.isArray(rv)) ? (rv.__isReactive ? rv : self._wrap(t, p, rv)) : rv; },
+          set(t, p, nv) { const b = t[p]; t[p] = nv; self.rep && self.rep.dataChange(`${self.name}.${k}.${String(p)}`, b, nv, "嵌套赋值"); self.scheduleRender(); return true; },
+        });
+      }
+    }
+  }
+  _wrap(parent, key, val) {
+    const self = this;
+    if (val.__reactive) return val;
+    const p = new Proxy(val, {
+      get(t, k2) { const rv = t[k2]; return (rv && typeof rv === "object" && !Array.isArray(rv)) ? self._wrap(t, k2, rv) : rv; },
+      set(t, k2, nv) { const b = t[k2]; t[k2] = nv; self.rep && self.rep.dataChange(`${self.name}.${key}.${String(k2)}`, b, nv, "嵌套赋值"); self.scheduleRender(); return true; },
+    });
+    try { p.__reactive = true; } catch (e) { /* proxy 上挂标记失败无妨 */ }
+    return p;
+  }
+
+  // ---------------------------------------------------------------- 渲染
+  mount(container) {
+    this.container = container;
+    this.hml = this.ctx.hml;
+    this.ast = parseHml(this.hml);
+    this.css = this.ctx.css || "";
+    this.callHook("onInit");
+    this.callHook("onReady");
+    this.callHook("onShow");
+    this.renderNow();
+    this.rep && this.rep.lifecycle(this.name, "onInit → onReady → onShow", `已挂载，data 字段 ${Object.keys(this._raw).join(", ") || "无"}`);
+  }
+
+  scheduleRender() {
+    if (this.destroyed || this.renderQueued) return;
+    this.renderQueued = true;
+    requestAnimationFrame(() => { this.renderQueued = false; this.renderNow(); });
+  }
+
+  renderNow() {
+    if (!this.container || this.destroyed) return;
+    try {
+      const t0 = performance.now();
+      this.container.innerHTML = "";
+      this._renderChildren(this.ast, this.container, this._raw);
+      const dt = performance.now() - t0;
+      this.lastRenderMs = dt;
+      if (dt > 120) {
+        this.rep && this.rep.push({
+          kind: "data", level: "warn", code: "PERF_RENDER",
+          title: `渲染耗时 ${dt.toFixed(0)}ms`,
+          message: `页面 ${this.name}，Lite 真机更慢（无 JIT + 64KB 堆）`,
+          hint: "检查 item 数量与嵌套；list 高度固定时可减少一次性渲染的条数",
+          file: this.name, line: 0,
+        });
+      }
+    } catch (e) {
+      this.rep && this.rep.exception(e, { page: this.name, event: "render" });
+    }
+  }
+
+  _renderChildren(parentNode, domParent, scope) {
+    for (const node of parentNode.children) this._renderNode(node, domParent, scope);
+  }
+
+  _renderNode(node, domParent, scope) {
+    if (node.tag === "#text") return this._renderText(node, domParent, scope);
+
+    const a = node.attrs || {};
+
+    // if / elif / else
+    if (a.if !== undefined && a.if !== true) {
+      let cond;
+      try { cond = this.evalExpr(String(a.if), scope); } catch (e) { cond = false; }
+      if (!truthy(cond)) return;
+    }
+    if (a.show !== undefined && a.show !== true) {
+      let cond;
+      try { cond = this.evalExpr(String(a.show), scope); } catch (e) { cond = false; }
+      if (!truthy(cond)) { /* show=false 仍构建，但隐藏 */ }
+    }
+
+    // for 循环
+    if (a.for !== undefined && a.for !== true) {
+      const it = this._evalFor(String(a.for), scope);
+      if (!it) return;
+      const { names, arr } = it;
+      for (let idx = 0; idx < arr.length; idx++) {
+        const childScope = Object.create(scope);
+        if (names.length === 2) { childScope[names[0]] = idx; childScope[names[1]] = arr[idx]; childScope.$item = arr[idx]; childScope.$index = idx; }
+        else { childScope[names[0]] = arr[idx]; childScope.$item = arr[idx]; childScope.$index = idx; }
+        const holder = document.createElement("div");
+        holder.style.display = "contents";
+        domParent.appendChild(holder);
+        this._renderNode({ tag: node.tag, attrs: strip(a, ["for"]), children: node.children, text: node.text }, holder, childScope);
+      }
+      return;
+    }
+
+    // 普通元素
+    const el = document.createElement(mapTag(node.tag));
+    this._applyAttrs(node, el, scope);
+    this._bindEvents(node, el, scope);
+    domParent.appendChild(el);
+    this._renderChildren(node, el, scope);
+  }
+
+  _renderText(node, domParent, scope) {
+    const ex = node.expr;
+    if (ex && ex.whole !== undefined) {
+      let v;
+      try { v = this.evalExpr(ex.whole, scope); } catch (e) { v = ""; }
+      domParent.appendChild(document.createTextNode(fmt(v)));
+      return;
+    }
+    if (ex && ex.parts) {
+      let out = "";
+      for (const p of ex.parts) {
+        if (p.lit !== undefined) out += p.lit;
+        else { try { out += fmt(this.evalExpr(p.expr, scope)); } catch (e) { /* 已报 */ } }
+      }
+      domParent.appendChild(document.createTextNode(out));
+      return;
+    }
+    domParent.appendChild(document.createTextNode(node.text || ""));
+  }
+
+  _evalFor(expr, scope) {
+    // 形式: array | value in array | (i, value) in array
+    let m;
+    if ((m = /^\((\w+)\s*,\s*(\w+)\)\s+in\s+(.+)$/.exec(expr))) return { names: [m[1], m[2]], arr: arr(this.evalExpr(m[3], scope)) };
+    if ((m = /^(\w+)\s+in\s+(.+)$/.exec(expr))) return { names: [m[1]], arr: arr(this.evalExpr(m[2], scope)) };
+    const v = this.evalExpr(expr, scope);
+    return Array.isArray(v) ? { names: ["$item"], arr: v } : null;
+    function arr(x) { return Array.isArray(x) ? x : []; }
+  }
+
+  _applyAttrs(node, el, scope) {
+    const a = node.attrs || {};
+    const cls = [], style = [];
+    for (const k of Object.keys(a)) {
+      const v = a[k];
+      if (k === "class") { cls.push(String(v)); continue; }
+      if (k === "style") { style.push(String(v)); continue; }
+      if (k === "id") { el.id = String(v); continue; }
+      if (k === "ref") { this._ref(String(v), el); continue; }
+      if (k === "if" || k === "for" || k === "show" || k === "tid") continue;
+      if (k === "value" || k === "src" || k === "placeholder" || k === "type") {
+        el.setAttribute(k, this._bindStr(String(v), scope));
+        continue;
+      }
+      if (k.startsWith("@") || k.startsWith("on") || k.startsWith("grab:")) continue;
+      el.setAttribute(k, this._bindStr(String(v), scope));
+    }
+    // 应用该 class 的 css（Lite 同名类叠加）
+    const cssText = this._cssFor(cls);
+    if (cssText) {
+      const st = document.createElement("style");
+      // 每次渲染生成作用域样式（简单可靠；量级可控）
+      st.textContent = cssText;
+      el.setAttribute("style", (el.getAttribute("style") || "") + ";" + cssTextToInline(cssText));
+    }
+    if (cls.length) el.className = cls.join(" ");
+    if (style.length) el.setAttribute("style", (el.getAttribute("style") || "") + ";" + style.join(";"));
+    // 透传事件属性值给 input
+    if (el.tagName === "INPUT" && a.value !== undefined) el.value = this._bindStr(String(a.value), scope);
+  }
+
+  _bindStr(v, scope) {
+    if (!v.includes("{{")) return v;
+    const ex = extractExpr(v);
+    if (ex.whole !== undefined) { try { return fmt(this.evalExpr(ex.whole, scope)); } catch (e) { return ""; } }
+    let out = "";
+    for (const p of ex.parts || []) out += p.lit !== undefined ? p.lit : fmt(safeEval(this, p.expr, scope));
+    return out;
+    function safeEval(pg, e, sc) { try { return pg.evalExpr(e, sc); } catch (err) { return ""; } }
+  }
+
+  _bindEvents(node, el, scope) {
+    const a = node.attrs || {};
+    for (const k of Object.keys(a)) {
+      let ev = null, handlerExpr = null;
+      if (k.startsWith("@")) { ev = k.slice(1); handlerExpr = a[k]; }
+      else if (/^on(click|longpress|swipe|touchstart|touchend|change)$/.test(k)) { ev = k.slice(2); handlerExpr = a[k]; }
+      else if (/^(grab|on):(\w+)$/.test(k)) {
+        // 静默失效前缀 —— 直接报错（真机最坑的行为）
+        this.rep && this.rep.event("inert", { prefix: RegExp.$1 + ":" + RegExp.$2, handler: a[k], file: this.name, level: "error", code: "EVT_INERT_PREFIX" }, "error");
+        continue;
+      }
+      if (!ev || !handlerExpr) continue;
+      const domEv = DOM_EVENTS[ev] || ev;
+      const m = /^([A-Za-z_$][\w$]*)\s*\(([\s\S]*)\)$/.exec(String(handlerExpr).trim());
+      const fnName = m ? m[1] : String(handlerExpr).trim();
+      const argSrc = m ? m[2] : "";
+
+      if (typeof this[fnName] !== "function") {
+        this.rep && this.rep.event("missing", { handler: fnName, event: ev, file: this.name, line: 0 }, "error");
+        continue;
+      }
+      this.rep && this.rep.event("bind", { handler: fnName, event: ev, file: this.name });
+      el.addEventListener(domEv, (domEvent) => {
+        const key = ev + ":" + fnName;
+        const n = (this.fireCounts.get(key) || 0) + 1;
+        this.fireCounts.set(key, n);
+        if (n === 3 || (n > 3 && n % 5 === 0)) {
+          this.rep && this.rep.event("bubbling", { handler: fnName, event: ev, times: n, file: this.name }, "warn");
+        }
+        let args = [];
+        if (argSrc.trim()) {
+          try { args = [this.evalExpr(argSrc, scope)]; } catch (e) { this.rep && this.rep.exception(e, { page: this.name, event: `${ev}:${fnName}`, source: argSrc }); }
+        }
+        try {
+          this.rep && this.rep.event("fire", { handler: fnName, event: ev, file: this.name });
+          const r = this[fnName](...args, domEvent);
+          if (r && typeof r.then === "function") r.catch(e => this.rep && this.rep.exception(e, { page: this.name, event: `${ev}:${fnName}` }));
+        } catch (e) {
+          this.rep && this.rep.exception(e, { page: this.name, event: `${ev}:${fnName}`, source: String(handlerExpr) });
+        }
+      }, { passive: true });
+    }
+  }
+
+  _ref(name, el) { (this.$refs || (this.$refs = {}))[name] = el; }
+
+  _cssFor(classes) {
+    if (!this.css) return "";
+    let out = "";
+    for (const c of classes) {
+      // Lite 只支持单类选择器，逐条抽取（同时能发现复合选择器问题）
+      const re = new RegExp("(^|\\n)\\s*\\." + c.replace(/[-]/g, "\\-") + "\\s*\\{[^}]*\\}", "g");
+      let m; while ((m = re.exec(this.css)) !== null) out += m[0].trim() + "\n";
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- 生命周期
+  callHook(name, ...args) {
+    const fn = this.def[name] || this[name];
+    if (typeof this.def[name] === "function") {
+      try { return this.def[name].apply(this, args); }
+      catch (e) { this.rep && this.rep.exception(e, { page: this.name, event: name }); }
+    }
+    return undefined;
+  }
+
+  show() { this.callHook("onShow"); }
+  hide() { this.callHook("onHide"); }
+
+  destroy() {
+    this.destroyed = true;
+    this.callHook("onDestroy");
+    this.mocks && this.mocks.clearAll();
+    this.rep && this.rep.lifecycle(this.name, "onDestroy", "定时器已清理");
+    if (this.container) this.container.innerHTML = "";
+  }
+}
+
+// ================================================================ 工具
+function mapTag(tag) {
+  switch (tag) {
+    case "text": return "div";
+    case "list": return "div";
+    case "list-item": return "div";
+    case "stack": return "div";
+    case "input": return "input";
+    case "image": case "img": return "img";
+    case "progress": return "div";
+    default: return tag;
+  }
+}
+function strip(o, keys) { const r = Object.assign({}, o); for (const k of keys) delete r[k]; return r; }
+function fmt(v) { return v === undefined || v === null ? "" : String(v); }
+
+// Lite CSS 规则 → inline style（Lite 单类选择器，可直接降维）
+export function cssTextToInline(cssText) {
+  const out = [];
+  const re = /(^|\n)\s*[^{]+\{([^}]*)\}/g;
+  let m;
+  while ((m = re.exec(cssText)) !== null) {
+    const body = m[2];
+    for (const decl of body.split(";")) {
+      const d = decl.trim();
+      if (d) out.push(d);
+    }
+  }
+  return out.join(";");
+}

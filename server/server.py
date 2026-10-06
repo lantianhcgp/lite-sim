@@ -28,10 +28,12 @@ os.makedirs(LOGDIR, exist_ok=True)
 
 # ---------------------------------------------------------------- 安全路径
 def safe_path(rel):
-    """把相对路径限制在仓库内；abs 允许指向被调试项目（如 memo-todo 源码）。"""
+    """把相对路径限制在仓库内；abs / ~ 允许指向被调试项目（如 memo-todo 源码）。"""
     rel = (rel or "").strip()
     if not rel:
         return None
+    if rel.startswith("~"):
+        rel = os.path.expanduser(rel)
     if rel.startswith("/"):
         p = os.path.normpath(rel)
     else:
@@ -241,6 +243,17 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/files":
             path = (q.get("path") or [""])[0]
             return self._send(200, fs_read(unquote(path)))
+        if u.path == "/api/projects":
+            # 列出 ~/hw_watch 下的被调试项目（含 entry/src/main/js/MainAbility 才算）
+            base = os.path.join(os.path.expanduser("~"), "hw_watch")
+            out = []
+            if os.path.isdir(base):
+                for n in sorted(os.listdir(base)):
+                    d = os.path.join(base, n, "entry/src/main/js/MainAbility")
+                    if os.path.isdir(d):
+                        out.append({"name": n, "base": d,
+                                    "files": sum(len(f) for _, _, f in os.walk(d))})
+            return self._send(200, {"ok": True, "projects": out})
         if u.path == "/api/tree":
             return self._send(200, fs_tree((q.get("path") or [""])[0]))
         if u.path == "/api/logs":
