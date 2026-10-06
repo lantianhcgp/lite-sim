@@ -1,39 +1,30 @@
-fix: 拼音候选词链路 7/7 通过（词典 seed + file.get 死循环）
+fix: 画布容器宽 0 导致图标全部挤出画布（红圈问题根因）
 
-用户报「切到拼音后点拼音不出候选词，实时显示的是英文字母，真机正常」。
-逐层取证（dump img 状态 → MCP 读日志 → 运行时源码反查 → 拆解最小复现）
-定位到 5 个独立问题，全部修复：
+用户截图圈 4 处：候选词区、底栏左右空白、右下白色区、日志警告。
 
-1. **file.get 返回值错 → readLargeFile 死循环（页面挂死 2.5 分钟）**
-   Lite 的 file.get 取的是「文件元信息」{length}，common/fs.js 的
-   readLargeFile 靠 data.length 算分块数。我的 mock 走了 simRead 返回
-   {text,offset,remaining} → data.length=undefined → read_count=NaN →
-   `idx >= NaN` 永远 false → step() 无限递归。
-   → get 改为返回 {uri, length}；readText 才返回内容分块
+根因（坐标铁证，?debug=1 逐元素 rect）：
+  修复前 <div im-bottom-tab-container> x=0..0 (0x54)  ← 宽 0
+         <img> x=-171..-123                              ← 图标在画布外
+  修复后 x=0..412、img x=23..71                          ← 全部归位
 
-2. **词典没进 file mock**
-   keyboard 页读 internal://app/rawfile/inputMethod/chineseCandidate.json
-   （26KB），mock 空 → 301 → chineseCandidateData=[] → 候选词永远为空。
-   → server 的 /api/source 附带 resources/rawfile/*（json/txt），
-   app.js 存 pendingRawfile 并 seed（3 个常见 uri 前缀都写）
+CSS 链断裂点：
+  #stage (flex column + align-items:center)
+    → #frameWrap { position:relative; background:#fff }   ← 没有宽度
+      → #frame { width:100%; max-width:412px }            ← 后一条规则覆盖 width:412px
+        → #screen { position:absolute; inset:0 }          ← 归零
+          → 所有 width:100% 子元素全链解析为 0
 
-3. **seed 时机错 → 模块缓存固化空词典**
-   inputMethod.js 模块顶层就调 loadCnDict()，seed 若在其后，
-   读到 301 后模块缓存不再重读。
-   → seed 放 loadProject 末尾（任何 runPage 之前）
+align-items:center 会让 flex item 按内容收缩，而 #frame 要 100% 父宽、
+#frameWrap 要靠内容定宽 —— 循环依赖塌缩成 0。子元素因 width:0 而溢出，
+图标被挤到负坐标（x=-171），底栏只剩 input 单独居中。
 
-4. **切换按钮找不到**
-   切换按钮是 <input value="{{inputMethod.keyboardType}}">
-   （不在 .nav-btn/.im-key 里）→ 测试选择器补 input
+修：#frameWrap 加 width:412px;max-width:100%
 
-5. **测试词本身不存在**：词典 d['n'] 无 'ihao' 组合（get('nihao')→0），
-   改用 'ni'（22 候选）。这是数据事实，不是 bug。
+同时修第二个 bug：hml 的 style 属性里常见
+  background-color: {{ RounderBackgroundValue.background }}
+_applyAttrs 对 style 直接 push 字符串不求值 → 整条声明无效 →
+图标容器背景透明、圆角丢失（图上看不到深色背景块）。
+→ style 也走 _bindStr() 求值
 
-另修：
-- 静态资源加 no-store + index.html 注入 ?v=mtime（浏览器/headless 一直
-  跑旧 app.js，SEED 代码在文件里但页面不执行 —— 排查中最绕的一环）
-- version 注入正则 group(3)→group(1)（\1 是反向引用，IndexError 崩服务端）
-- pinyinTest 加 ?pinyin=1 自动化（7 步：切拼音→打字→display→候选词）
-
-回归：checker 30/30、moduleloader 9/9、全项目加载失败 0、
-      smoke 6/6、journey 25/25、拼音 7/7
+回归：checker 30/30、moduleloader 9/9、smoke 6/6、
+      journey 25/25、拼音 7/7

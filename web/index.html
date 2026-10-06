@@ -34,7 +34,7 @@ main{flex:1;display:flex;min-height:0}
 /* 左：画布 */
 #stage{flex:0 0 auto;padding:14px;overflow:auto;border-right:1px solid var(--line);
   display:flex;flex-direction:column;gap:10px;align-items:center}
-#frameWrap{position:relative;background:#fff}
+#frameWrap{position:relative;background:#fff;width:412px;max-width:100%}  /* 必须显式给宽：#stage 是 align-items:center 的 flex，item 会按内容收缩，而 #frame 用 width:100% → 循环依赖塌缩成 0，导致 screen 及全部 width:100% 子元素宽 0、图标被挤出画布 */
 /* 真机截图里圆角外是白底（R≈100 弧线外纯白），模拟器必须一致，否则圆角轮廓隐形 */
 #frame{width:412px;height:484px;background:#000;border-radius:100px;overflow:hidden;
   position:relative;box-shadow:0 0 0 8px #1a1d23,0 18px 48px rgba(0,0,0,.6)}

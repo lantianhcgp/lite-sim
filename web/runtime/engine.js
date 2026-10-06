@@ -559,7 +559,12 @@ export class Page {
     for (const k of Object.keys(a)) {
       const v = a[k];
       if (k === "class") { for (const c of String(v).split(/\s+/)) if (c) cls.push(c); continue; }  // "item tail" 必须拆开
-      if (k === "style") { style.push(String(v)); continue; }
+      if (k === "style") {
+        // hml 的 style 里常见 {{ RounderBackgroundValue.background }} 这类动态值，
+        // 原样保留会让 background-color/border-radius 整条声明失效（div 变透明）
+        style.push(this._bindStr(String(v), scope));
+        continue;
+      }
       if (k === "id") { el.id = String(v); continue; }
       if (k === "ref") { this._ref(String(v), el); continue; }
       if (k === "if" || k === "for" || k === "show" || k === "tid") continue;
