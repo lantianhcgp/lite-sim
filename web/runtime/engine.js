@@ -73,9 +73,11 @@ function parseAttrs(s) {
   const re = /([\w:@.-]+)\s*=\s*"([^"]*)"/g;
   let m;
   while ((m = re.exec(s)) !== null) out[m[1]] = m[2];
-  // 无值布尔属性
+  // 无值布尔属性 —— 必须跳过已在引号内的片段，否则 style="width : 74 px;..." 里的
+  // width/font-size 会被误判成布尔属性（DOM 上出现 chipw="true" 这种脏属性）
+  const stripped = s.replace(/\s[\w:@.-]+\s*=\s*"[^"]*"/g, " ").replace(/"[^"]*"/g, "");
   const re2 = /(?:^|\s)([a-zA-Z][\w-]*)(?=\s|$)/g;
-  while ((m = re2.exec(s)) !== null) if (!(m[1] in out)) out[m[1]] = true;
+  while ((m = re2.exec(stripped)) !== null) if (!(m[1] in out)) out[m[1]] = true;
   return out;
 }
 
@@ -574,7 +576,7 @@ export class Page {
       if (k === "style") {
         // hml 的 style 里常见 {{ RounderBackgroundValue.background }} 这类动态值，
         // 原样保留会让 background-color/border-radius 整条声明失效（div 变透明）
-        style.push(this._bindStr(String(v), scope));
+        style.push(fixCssUnits(this._bindStr(String(v), scope)));
         continue;
       }
       if (k === "id") { el.id = String(v); continue; }
@@ -614,6 +616,17 @@ export class Page {
     }
     if (cls.length) el.className = cls.join(" ");
     if (style.length) el.setAttribute("style", (el.getAttribute("style") || "") + ";" + style.join(";"));
+    // 真机：带 border-radius 的容器会把溢出的子内容按圆角裁掉（用户实测键盘图标是圆角裁切的）。
+    // 浏览器的 border-radius 不会自动裁子元素，必须显式 overflow:hidden。
+    // 必须在「类 CSS + 元素 style」都合并之后判断 —— 图标容器（hml line 18/28/85/89）
+    // 没有 class，border-radius 只在 style 属性里，放早了会漏（实测漏 4 个）。
+    // 另注意别被 text-overflow:ellipsis 骗了（它含 "overflow:"），只认真正的 overflow。
+    {
+      const fin = el.getAttribute("style") || "";
+      if (/border-radius\s*:/.test(fin) && !/(?<![-a-z])overflow\s*:/.test(fin)) {
+        el.setAttribute("style", fin + ";overflow:hidden");
+      }
+    }
     // 透传事件属性值给 input；value 属性缺失时用子文本（Lite 的 <input>{{x}}</input> 写法）
     if (el.tagName === "INPUT") {
       const rawVal = a.value !== undefined ? a.value : String(node.text || "").trim();
@@ -754,7 +767,14 @@ function strip(o, keys) { const r = Object.assign({}, o); for (const k of keys) 
 function fmt(v) { return v === undefined || v === null ? "" : String(v); }
 
 // Lite CSS 规则 → inline style（Lite 单类选择器，可直接降维）
-export function cssTextToInline(cssText) {
+export // hml 常写成 `width : {{ chipW }} px`，求值后是 "74 px"（数字与单位间有空格）。
+// 浏览器 CSS 视其为无效声明 → 整条丢弃 → 回退到类里的硬编码值（54px/38px），
+// 于是 EN 模式的 74 宽、24 字号全失效，候选词文字撑破 54 宽的框（实测 might 溢出）。
+function fixCssUnits(s) {
+  return String(s).replace(/(\d)\s+(px|pt|rpx|%|em|rem|vw|vh|deg|s|ms)\b/g, "$1$2");
+}
+
+function cssTextToInline(cssText) {
   const out = [];
   const re = /(^|\n)\s*[^{]+\{([^}]*)\}/g;
   let m;
@@ -765,5 +785,5 @@ export function cssTextToInline(cssText) {
       if (d) out.push(d);
     }
   }
-  return out.join(";");
+  return fixCssUnits(out.join(";"));
 }

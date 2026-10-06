@@ -1,32 +1,35 @@
-fix: 候选词文字掉到方块外（input 子文本被当兄弟节点）
+fix: 候选词溢出方框 + 图标圆角裁切（对齐真机）
 
-用户截图：打字 mi 后，might/million/microsoft 等候选词文字显示在
-方块排的**下方**、挤到键盘字母行上方，方块里是空的。
+用户两个反馈：
+1.「候选词没在它的框里面」
+2.「键盘上的图标应该是圆角裁切的，我真机是这样的」
 
-根因（parseHml）：
-  VOID_LIKE = ["input","img","progress"] → input 不进栈
-  于是 <input ...>{{$item}}</input> 的子文本被 pushText 到**父节点**
-  （list-item）成为兄弟 #text。flex column 布局下：
-    list-item
-      ├─ input (54×54, 带背景 = 方块)
-      └─ #text "{{$item}}"          ← 文字独立成行，掉在方块下面
+根因 1 — CSS 单位前的空格让整条声明失效：
+  hml 写 `width : {{ chipW }} px` → 求值成 `width : 74 px`
+  （数字与单位间有空格）——浏览器 CSS 视为**无效声明整条丢弃**，
+  于是回退到 .im-candidate-text 类里的硬编码 width:54px;
+  font-size:38px。EN 模式本该是 chipW=74 / chipFont=24，
+  54 宽 + 38px 字号下 `might`(约55px) 必然溢出 → 「不在框里」。
+  修：fixCssUnits() 把 `74 px` 规范化成 `74px`，
+      cssTextToInline 与元素 style 求值后都过一遍。
+  实测：width/font 恢复为 (74, 24) ✓
 
-而 _applyAttrs 只认 a.value 属性，hml 写的是子文本 → value 恒为空。
+根因 2 — 浏览器 border-radius 不裁子元素：
+  真机 Lite 中带 border-radius 的容器会把溢出的子内容按圆角裁掉，
+  浏览器必须显式 overflow:hidden。
+  修：最终 style 合并后，若含 border-radius 且无真 overflow → 补 hidden。
+  两个坑：
+  a) 必须放在「类 CSS + 元素 style」合并**之后** —— 图标容器
+     (hml line 18/28/85/89) 没有 class，border-radius 只在 style
+     属性里，放早了漏 4 个（实测）；
+  b) 检测别被 `text-overflow:ellipsis` 骗了（它含 "overflow:"），
+     用 lookbehind `(?<![-a-z])overflow`。
+  实测：30/30 含 border-radius 的 div 全部有 overflow:hidden ✓
 
-修两处：
-1. parseHml：input 有显式闭合时，把 start=gt+1..</input> 的内容收进
-   node.text（注意起点必须是标签结束后，否则 slice 会包含
-   `<input ...>` 自身、被 indexOf("<")<0 守卫误杀——第一版就栽在这）
-2. _applyAttrs：value 属性缺失时用 node.text（trim 后）作 el.value
-
-验证（?type=mi 自动打字 + TYPE_REPORT）：
-  修复前  #0 value="" #1 value="" ...
-  修复后  #0 value="might" #1 "million" #2 "microsoft"
-          #3 "miles" #4 "minutes" #5 "michael"
-  坐标 @93,217 54x54 依次 x+58（54+2+2 margin）✓
-
-另加 ?type=<词> 自动打字测试入口（?debug=1 下 TYPE_REPORT 报每个
-input 的 value+rect）。
+顺带修 parseAttrs 布尔属性正则：
+  `/(?:^|\s)([\w-]*)(?=\s|$)/` 不跳过引号内容，把 style 值内部的
+  width/font-size/color... 误判成布尔属性（DOM 出现 chipw="true" 等脏
+  属性）。改为先剥离 `attr="..."` 与引号串再匹配。
 
 回归：checker 30/30、moduleloader 9/9、全项目加载失败 0、
       smoke 6/6、journey 25/25、拼音 7/7
