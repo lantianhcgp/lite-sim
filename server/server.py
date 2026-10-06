@@ -204,6 +204,10 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # 开发期 web/*.js 改动频繁：不加这个浏览器/headless 会一直用缓存的旧版
+        # （实测 seed 代码已在文件里，但页面执行的还是旧 app.js → SEED_DBG 0 条）
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -228,7 +232,25 @@ class H(BaseHTTPRequestHandler):
         if u.path in ("/", "/index.html"):
             fp = os.path.join(WEB, "index.html")
             if os.path.isfile(fp):
-                return self._send(200, open(fp, encoding="utf-8").read(), "text/html; charset=utf-8")
+                html = open(fp, encoding="utf-8").read()
+                # 给 script/css 加 mtime 版本号：浏览器会缓存 index.html 引用的 app.js，
+                # 改了文件页面还跑旧版（实测 SEED 代码在文件里但页面不执行）
+                def _v(m):
+                    p = os.path.join(WEB, m.group(1))
+                    v = int(os.path.getmtime(p)) if os.path.isfile(p) else 0
+                    return m.group(0).replace(m.group(1), "%s?v=%d" % (m.group(1), v))
+                import re as _re
+                def _v2(m):
+                    rel = m.group(2).lstrip("/")
+                    cand = [os.path.join(ROOT, rel), os.path.join(WEB, os.path.basename(rel))]
+                    v = 0
+                    for c in cand:
+                        if os.path.isfile(c):
+                            v = int(os.path.getmtime(c)); break
+                    # 正则只有 2 组：(引号) 和 (路径)，\1 是反向引用不是第 3 组
+                    return m.group(1) + m.group(2) + "?v=" + str(v) + m.group(1)
+                html = _re.sub(r'(["\'])(/web/[\w./-]+\.(?:js|css))\1', _v2, html)
+                return self._send(200, html, "text/html; charset=utf-8")
             return self._send(404, {"error": "web/index.html 不存在"})
         if u.path.startswith("/web/"):
             fp = safe_path(u.path[1:])
@@ -303,8 +325,24 @@ class H(BaseHTTPRequestHandler):
                         files[rel] = open(fp, encoding="utf-8", errors="replace").read()
                     except Exception as e:
                         files[rel] = "/* 读取失败: %s */" % e
+        # 附带 resources/rawfile/：词典（chineseCandidate.json 26KB、enWords.json 27KB）
+        # 等运行时要读的资源 —— file mock 没有它们，拼音候选词就会一直是空
+        raw = {}
+        rbase = os.path.join(os.path.expanduser("~"), "hw_watch", proj, "entry/src/main/resources/rawfile")
+        if os.path.isdir(rbase):
+            for dirpath, dirs, fns in os.walk(rbase):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                for fn in fns:
+                    fp = os.path.join(dirpath, fn)
+                    rel = "rawfile/" + os.path.relpath(fp, rbase)
+                    try:
+                        # 只带文本类（json/txt），二进制不塞进 bundle
+                        if os.path.splitext(fn)[1].lower() in (".json", ".txt", ".csv", ".html", ".js", ".css"):
+                            raw[rel] = open(fp, encoding="utf-8", errors="replace").read()
+                    except Exception:
+                        pass
         return {"ok": True, "project": proj, "base": base, "files": files,
-                "count": len(files), "ts": time.strftime("%H:%M:%S")}
+                "rawfile": raw, "count": len(files), "ts": time.strftime("%H:%M:%S")}
 
     def do_POST(self):
         u = urlparse(self.path)

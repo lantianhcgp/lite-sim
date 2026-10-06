@@ -1,3 +1,4 @@
+document.documentElement.dataset.appVer = "seedfix-2";   // 供 dump 判定页面执行的 app.js 版本
 // lite-sim 主逻辑：拉源码 → 规则体检 → 运行页面 → 报错面板 → 上报
 import { checkAll } from "/web/checker.js";
 import { Reporter } from "/web/reporter.js";
@@ -9,6 +10,22 @@ const rep = new Reporter({ endpoint: "/api/logs" });
 // 真机语义：app 进程持续，$app 全局唯一、模块只加载一次（pages_array/current_uri
 // 是模块级变量）。所以 mocks 与 ModuleLoader 长期持有，只有「重置」才换新的。
 let mocks = null;
+let pendingRawfile = null;      // /api/source 下发的 resources/rawfile，等 mocks 建好再注入
+
+// 把暂存的 rawfile 注入 file mock（Lite 用 internal://app/rawfile/... 读）
+function seedPendingRawfile() {
+  if (!pendingRawfile || !mocks || typeof mocks.seedFiles !== "function") return;
+  const seed = {};
+  for (const [rel, content] of Object.entries(pendingRawfile)) {
+    const p = rel.replace(/^rawfile\//, "");   // rawfile/inputMethod/x.json → inputMethod/x.json
+    seed["internal://app/rawfile/" + p] = content;
+    seed["/app/resources/rawfile/" + p] = content;
+    seed["resources/rawfile/" + p] = content;
+  }
+  mocks.seedFiles(seed);
+  // 暂时不做 rep.push：曾与 ensureRuntime 组合导致 headless 挂死，先验证是否 push 的问题
+  if (typeof window !== "undefined") window.__seeded = Object.keys(pendingRawfile).length;
+}
 let loader = null;
 let source = null;          // { project, files, base }
 let issues = [];            // 最近一次体检结果
@@ -153,10 +170,21 @@ async function loadProject() {
     if (!source.ok) throw new Error(source.error || "加载失败");
     $("#fileInfo").textContent = source.count;
     $("#projInfo").textContent = source.project;
+    // 暂存 rawfile：此时 mocks 还是 null（懒创建），必须等 ensureRuntime()
+    // 建好 mocks 再注入 —— 之前直接 seed 因为 mocks===null 被静默跳过
+    pendingRawfile = source.rawfile || null;
+    // 必须在任何 runPage/模块加载之前 seed：inputMethod.js 模块顶层就调 loadCnDict()
+    // 读词典，若那时还没 seed 会读到 301 → chineseCandidateData=[] 并被模块缓存固定住。
+    // （曾放在 pinyinTest 里导致候选词永远为空）
+    ensureRuntime();
+    seedPendingRawfile();
     setInfo("");
     return source;
   } catch (e) {
     toast("拉取源码失败: " + e.message);
+    // 必须记日志：catch 吞掉异常会让 seed 段落「悄悄不执行」（排查过一轮）
+    rep.push({ kind: "api", level: "error", code: "LOAD_PROJ_ERR",
+      title: "loadProject 异常", message: String(e && e.stack || e), hint: "", file: "app.js", line: 0 });
     rep.push({ kind: "api", level: "error", code: "SRC_LOAD", title: "源码拉取失败", message: String(e.message),
       hint: "确认服务端已启动：python3 server/server.py 8787；项目路径 ~/hw_watch/<name>/entry/src/main/js/MainAbility" });
     return null;
@@ -189,7 +217,7 @@ function runCheck() {
 // ============================================================ 运行页面
 // 长期运行时：mocks（$app/@system.* 全局）+ 模块加载器缓存，跨页共享
 function ensureRuntime() {
-  if (mocks) return;
+  if (mocks) return mocks;
   mocks = createSysMocks(rep, {
     onNavigate: (uri) => {
       if (!uri || uri === currentRel) return;
@@ -201,6 +229,7 @@ function ensureRuntime() {
     },
   });
   loader = new ModuleLoader(source.files, { reporter: rep, mocks, project: source.project });
+  return mocks;
 }
 // 重置 = 真机的杀进程重开：换掉 $app 全局与模块缓存
 function resetRuntime() {
@@ -314,6 +343,86 @@ $("#project").onchange = async () => { await loadProject(); resetRuntime(); buil
 
 // ============================================================ 冒烟测试 ?smoke=1
 // headless/一键验证：体检 → 运行 index → 点"+ 添加" → 断言跳到 edit → 点返回
+
+// ============================================ 拼音链路测试 ?pinyin=1
+async function pinyinTest() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const $ = s => document.querySelector(s);
+  const btns = () => Array.from(document.querySelectorAll("#screen .nav-btn, #screen .im-func, #screen .im-key"));
+  const steps = [];
+  const step = (n, ok, detail) => {
+    steps.push({ n, ok, detail });
+    rep.push({ kind: "lifecycle", level: ok ? "info" : "error",
+      code: ok ? "PY_OK" : "PY_FAIL", title: n, message: detail || "", hint: "", file: "test", line: 0 });
+    return ok;
+  };
+  const state = () => {
+    const p = currentPage || {};
+    const d = (p._raw && p._raw) || {};
+    const im = d.inputMethod || {};
+    return {
+      kb: im.keyboardType, pin: im.chineseCandidateWord,
+      cand: (im.candidateArr || []).slice(0, 6),
+      typeData: d.typeData, display: d.display,
+      dom: (($("#screen .edit-text") || {}).textContent || "").trim(),
+      dom2: (($("#screen .im-sub-input") || {}).textContent || "").trim(),
+    };
+  };
+  const S = () => JSON.stringify(state());
+  // 直接查 reporter 内存：SEED_DBG 到底 push 了没有（区分"没 push"和"push 了没渲染"）
+  // 运行时反查：页面执行的 loadProject 源码里到底有没有 SEED 段
+  seedPendingRawfile();   // 注入词典（file.get 修好后不会卡死）
+  step("词典已注入", (mocks && mocks.files.has("internal://app/rawfile/inputMethod/chineseCandidate.json")) || false,
+    `files=${mocks ? mocks.files.size : "-"} 字典=${mocks && mocks.files.has("internal://app/rawfile/inputMethod/chineseCandidate.json")}`);
+  runPage("pages/keyboard/keyboard");
+  await sleep(500);
+
+  const s0 = state();
+  step("进入 keyboard", !!s0.kb || s0.typeData !== undefined, S());
+
+  // 1) 点「拼音/EN」切换按钮
+  // 切换按钮是 <input value="{{inputMethod.keyboardType}}">，不在 .nav-btn/.im-key 里
+  const sw = Array.from(document.querySelectorAll("#screen input, #screen .nav-btn, #screen .im-func"))
+    .find(e => /^(EN|拼音|中|英)$/.test(String(e.value || e.textContent || "").trim()))
+    || btns().find(b => /拼音|中/.test(b.textContent) || /EN|英/.test(b.textContent));
+  if (sw) { sw.click(); await sleep(400); }
+  const s1 = state();
+  step("切换到拼音", sw ? (s1.kb === "拼音") : false,
+    `按钮="${sw ? sw.textContent.trim() : "未找到"}" keyboardType=${JSON.stringify(s1.kb)}`);
+
+  // 2) 拼音模式下打 n-i-h-a-o
+  const typed = [];
+  for (const ch of ["n", "i"]) {   // 词典 n+i=22 候选；"nihao" 组合不存在（实测 get→0）
+    if (state().pin === "ni") break;
+    const el = Array.from(document.querySelectorAll("#screen .im-key"))
+      .find(e => (e.textContent || "").trim() === ch);
+    if (el) { el.click(); typed.push(ch); }
+    await sleep(140);
+  }
+  await sleep(500);
+  const s2 = state();
+  step("拼音打字 chineseCandidateWord", s2.pin === "ni",
+    `点了=${typed.join("")} pin=${JSON.stringify(s2.pin)} typeData=${JSON.stringify(s2.typeData)}`);
+  step("display 显示拼音而非英文字母",
+    (s2.display || "").includes("ni") || (s2.dom || "").includes("ni") || (s2.dom2 || "").includes("ni"),
+    `display=${JSON.stringify(s2.display)} dom=${JSON.stringify(s2.dom)} dom2=${JSON.stringify(s2.dom2)}`);
+  step("候选词出现", Array.isArray(s2.cand) && s2.cand.length > 0,
+    `候选=${JSON.stringify(s2.cand)} 总数=${(s2.cand || []).length}`);
+
+  // 3) 词典文件是否读到
+  const files = (mocks && mocks.files) ? mocks.files : null;
+  const hasDict = files && files.has && files.has("internal://app/rawfile/inputMethod/chineseCandidate.json");
+  step("词典文件已注入 mock", !!hasDict,
+    `mocks.files 里有词典=${hasDict} 文件数=${files && files.size}`);
+
+  // 汇总
+  const fails = steps.filter(s => !s.ok);
+  rep.push({ kind: "lifecycle", level: fails.length ? "error" : "info", code: "PY_DONE",
+    title: `拼音链路测试 ${steps.length - fails.length}/${steps.length} 通过`,
+    message: fails.map(f => f.n).join("、") || "全通", hint: "", file: "test", line: 0 });
+  levelMode = "all"; filter.level = LEVEL_MODES.all; buildChips(); renderList();
+}
+
 async function smoke() {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const step = (name, ok, detail) => rep.push({
@@ -561,6 +670,7 @@ window.addEventListener("unhandledrejection", e => {
   // ?smoke=1 → 跑一遍冒烟（headless 验证 / 一键回归）
   if (qs.get("smoke")) setTimeout(() => smoke(), 400);
   if (qs.get("journey")) setTimeout(() => journey(), 500);
+  if (qs.get("pinyin")) setTimeout(() => pinyinTest(), 600);
   // ?debug=1 → 把画布内每个元素的实际渲染矩形报进日志（排查错位/溢出）
   if (qs.get("debug")) {
     setTimeout(() => {

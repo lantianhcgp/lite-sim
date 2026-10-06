@@ -190,7 +190,18 @@ export function createSysMocks(reporter, opts = {}) {
       delete(o) { rec("storage.delete", "call", o); store.delete(o.key); setTimeout(() => o.success && o.success(), 0); },
     },
     file: {
-      get(o) { rec("file.get", "call", { uri: o.uri }); simRead({ uri: o.uri, success: o.success, fail: o.fail }); },
+      // Lite 的 file.get 取的是「文件元信息」(length)，readLargeFile 靠 data.length
+      // 算分块数。若像 readText 那样返回 text，data.length 会是 undefined →
+      // read_count=NaN → idx>=NaN 永远 false → step() 无限递归 → 页面卡死（实测）
+      get(o) {
+        const ok = files.has(o.uri);
+        rec("file.get", ok ? "ok" : "fail", { uri: o.uri }, { code: ok ? 0 : 301 });
+        setTimeout(() => {
+          if (!ok) { o.fail && o.fail({}, 301); return; }
+          const full = files.get(o.uri) || "";
+          o.success && o.success({ uri: o.uri, length: full.length });
+        }, 0);
+      },
       readText(o) { rec("file.readText", "call", { uri: o.uri, position: o.position }); simRead(o); },
       writeText(o) { rec("file.writeText", "call", { uri: o.uri, len: (o.text || "").length }); files.set(o.uri, (o.text || "")); setTimeout(() => o.success && o.success(), 0); },
       access(o) {

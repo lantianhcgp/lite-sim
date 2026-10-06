@@ -1,24 +1,39 @@
-fix: 键盘图标 4/4 恢复显示（修掉我自己引入的 URL 套娃）
+fix: 拼音候选词链路 7/7 通过（词典 seed + file.get 死循环）
 
-用户反馈"几个键盘图标都没显示"。逐步取证（dump img 状态 → error 诊断日志）
-抓到根因是我上一轮修复引入的**双重转换**：
+用户报「切到拼音后点拼音不出候选词，实时显示的是英文字母，真机正常」。
+逐层取证（dump img 状态 → MCP 读日志 → 运行时源码反查 → 拆解最小复现）
+定位到 5 个独立问题，全部修复：
 
-  /api/res?project=memo-todo&path=api%2Fres%3Fproject%3D...%26path%3Dcommon%2Fimage...
-  （path 里嵌了整个 /api/res URL，服务端按这个假路径找文件 → 404 → 全部降级）
+1. **file.get 返回值错 → readLargeFile 死循环（页面挂死 2.5 分钟）**
+   Lite 的 file.get 取的是「文件元信息」{length}，common/fs.js 的
+   readLargeFile 靠 data.length 算分块数。我的 mock 走了 simRead 返回
+   {text,offset,remaining} → data.length=undefined → read_count=NaN →
+   `idx >= NaN` 永远 false → step() 无限递归。
+   → get 改为返回 {uri, length}；readText 才返回内容分块
 
-三处转换叠了两层：
-  1. _applyAttrs 开头的静态转换块      （上一轮加）
-  2. _applyAttrs 属性循环里的转换      （本轮加）
-  3. 渲染块的"兜底再转一次"            （上上轮加，无防套娃判断）
+2. **词典没进 file mock**
+   keyboard 页读 internal://app/rawfile/inputMethod/chineseCandidate.json
+   （26KB），mock 空 → 301 → chineseCandidateData=[] → 候选词永远为空。
+   → server 的 /api/source 附带 resources/rawfile/*（json/txt），
+   app.js 存 pendingRawfile 并 seed（3 个常见 uri 前缀都写）
 
-修复：
-- 删除 ①③，只保留 ② 属性循环里这一处统一转换（转换点从 3 → 1）
-- ② 加 !sv.includes("/api/res") 防套娃
-- error 降级判定改用 complete && naturalWidth===0（等一个事件循环，
-  避免原始路径 404 波及新状态）
-- 失败时把完整 URL/complete/naturalWidth 报进日志（本次定位的关键证据）
+3. **seed 时机错 → 模块缓存固化空词典**
+   inputMethod.js 模块顶层就调 loadCnDict()，seed 若在其后，
+   读到 301 后模块缓存不再重读。
+   → seed 放 loadProject 末尾（任何 runPage 之前）
 
-验证：
-  dump: 4/4 img 均为正确代理 URL、无降级样式、无套娃、img.load 失败 0
-  截图: 虚线占位色 629 → 59，占位块 1096 → 176
-回归: checker 30/30、moduleloader 9/9、journey 25/25、全项目加载失败 0
+4. **切换按钮找不到**
+   切换按钮是 <input value="{{inputMethod.keyboardType}}">
+   （不在 .nav-btn/.im-key 里）→ 测试选择器补 input
+
+5. **测试词本身不存在**：词典 d['n'] 无 'ihao' 组合（get('nihao')→0），
+   改用 'ni'（22 候选）。这是数据事实，不是 bug。
+
+另修：
+- 静态资源加 no-store + index.html 注入 ?v=mtime（浏览器/headless 一直
+  跑旧 app.js，SEED 代码在文件里但页面不执行 —— 排查中最绕的一环）
+- version 注入正则 group(3)→group(1)（\1 是反向引用，IndexError 崩服务端）
+- pinyinTest 加 ?pinyin=1 自动化（7 步：切拼音→打字→display→候选词）
+
+回归：checker 30/30、moduleloader 9/9、全项目加载失败 0、
+      smoke 6/6、journey 25/25、拼音 7/7
