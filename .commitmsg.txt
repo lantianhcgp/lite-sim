@@ -1,20 +1,24 @@
-fix: 图标显示 + 日志默认降噪（用户截图反馈两问题）
+fix: 键盘图标 4/4 恢复显示（修掉我自己引入的 URL 套娃）
 
-用户截图圈出 4 个坏图图标 + 225 条日志刷屏：
+用户反馈"几个键盘图标都没显示"。逐步取证（dump img 状态 → error 诊断日志）
+抓到根因是我上一轮修复引入的**双重转换**：
 
-1. 图标 404：keyboard.hml 用 `<image src="/common/image/inputMethod/…">`
-   这是 app 内资源路径，浏览器直连 404 → 显示浏览器坏图图标。
-   - server 增加 GET /api/res?project=&path=（限 MainAbility 内，防路径穿越，
-     返回正确 MIME；实测 icon-button-search.png → 200 image/png 779B）
-   - engine 渲染 image 时把 / 开头的 src 转发到 /api/res；
-     加载失败（如 icon-button-keyboard-en.png 确实不存在）onerror 降级成
-     虚线占位块，不再显示坏图图标
+  /api/res?project=memo-todo&path=api%2Fres%3Fproject%3D...%26path%3Dcommon%2Fimage...
+  （path 里嵌了整个 /api/res URL，服务端按这个假路径找文件 → 404 → 全部降级）
 
-2. 日志刷屏：一次运行 225 条（176 info 的 PERF/API/EVT 日志）淹没重点。
-   - reporter.filter 支持 level 数组
-   - 新增 LEVEL_MODES：alarm=告警(error+warn，默认) / all / error / warn / info
-   - chips 默认选中「告警」→ 列表从 225 张降到 6 张
-   - journey/smoke 结束时自动切回「全部」，保证测试结果可见
+三处转换叠了两层：
+  1. _applyAttrs 开头的静态转换块      （上一轮加）
+  2. _applyAttrs 属性循环里的转换      （本轮加）
+  3. 渲染块的"兜底再转一次"            （上上轮加，无防套娃判断）
 
-回归：journey 25/25、smoke 6/6、checker 30/30、moduleloader 9/9、
-      全项目加载失败 0
+修复：
+- 删除 ①③，只保留 ② 属性循环里这一处统一转换（转换点从 3 → 1）
+- ② 加 !sv.includes("/api/res") 防套娃
+- error 降级判定改用 complete && naturalWidth===0（等一个事件循环，
+  避免原始路径 404 波及新状态）
+- 失败时把完整 URL/complete/naturalWidth 报进日志（本次定位的关键证据）
+
+验证：
+  dump: 4/4 img 均为正确代理 URL、无降级样式、无套娃、img.load 失败 0
+  截图: 虚线占位色 629 → 59，占位块 1096 → 176
+回归: checker 30/30、moduleloader 9/9、journey 25/25、全项目加载失败 0

@@ -467,17 +467,26 @@ export class Page {
     // <image src="/common/image/…"> 是 app 内资源路径，浏览器直连 404 → 转发 /api/res；
     // 加载失败（文件名不存在等）时降级成占位块，不显示浏览器的坏图图标
     if (node.tag === "image" || node.tag === "img") {
-      const raw = el.getAttribute("src") || "";
-      if (raw && raw.startsWith("/") && !raw.startsWith("//")) {
-        el.setAttribute("src",
-          "/api/res?project=" + encodeURIComponent(this.project) +
-          "&path=" + encodeURIComponent(raw.replace(/^\//, "")));
-      }
+      // src 的代理转换统一在 _applyAttrs 的属性循环里做 —— 这里绝不能再转一次，
+      // 否则套娃成 /api/res?path=api%2Fres%3Fpath%3D…（实测 4 个图标全 404 降级）
+      // 降级判定：等一个事件循环，看「当前」代理 URL 是否真的加载失败。
+      // 光看 src 值不够 —— 原始路径的 404 会在改完 src 之后才把 error 送回来，
+      // 那时 src 已是代理路径，直接降级会把好图误杀（用户实测"图标都没显示"）。
       el.addEventListener("error", () => {
-        el.removeAttribute("src");
-        el.style.background = "#24262C";
-        el.style.border = "1px dashed #3A3F47";
-      }, { once: true });
+        const tried = el.getAttribute("src") || el.src || "";
+        setTimeout(() => {
+          const cur = el.getAttribute("src") || "";
+          if (!cur.includes("/api/res")) return;
+          if (!(el.complete && el.naturalWidth === 0)) return;   // 当前图其实成功了
+          // 诊断：把失败的完整 URL 报进日志（排查代理 404 / 编码问题）
+          if (this.rep) this.rep.api("img.load", { src: cur.slice(0, 150), tried: String(tried).slice(0, 150),
+            complete: el.complete, naturalWidth: el.naturalWidth }, "fail",
+            { url: cur, eventSrc: tried });
+          el.removeAttribute("src");
+          el.style.background = "#24262C";
+          el.style.border = "1px dashed #3A3F47";
+        }, 0);
+      });
     }
 
     this._bindEvents(node, el, scope);
@@ -527,6 +536,9 @@ export class Page {
 
   _applyAttrs(node, el, scope) {
     const a = node.attrs || {};
+    // 注意：image 的 src 统一在下面的属性循环里转换（动态/静态一次处理），
+    // 不要在这里再改 a.src —— 会和循环里的转换叠成 /api/res?path=api%2Fres%3F… 套娃
+
     // 收集 ref="xxx" → $refs（Lite 的 ref 由框架注入到 this.$refs）
     if (a.ref !== undefined && a.ref !== true) {
       const nm = String(a.ref).replace(/[{}"]/g, "").trim();
@@ -541,7 +553,16 @@ export class Page {
       if (k === "ref") { this._ref(String(v), el); continue; }
       if (k === "if" || k === "for" || k === "show" || k === "tid") continue;
       if (k === "value" || k === "src" || k === "placeholder" || k === "type") {
-        el.setAttribute(k, this._bindStr(String(v), scope));
+        let sv = this._bindStr(String(v), scope);
+        // 动态 src（src="{{ '/common/…' + menuType }}"）必须在这里就转代理路径：
+        // 若先设原始路径、渲染后再改，旧的 404 error 会波及新状态把图标误降级
+        if (k === "src" && (node.tag === "image" || node.tag === "img")
+            && typeof sv === "string" && sv.startsWith("/") && !sv.startsWith("//")
+            && !sv.includes("/api/res")) {
+          sv = "/api/res?project=" + encodeURIComponent(this.project) +
+               "&path=" + encodeURIComponent(sv.replace(/^\//, ""));
+        }
+        el.setAttribute(k, sv);
         continue;
       }
       if (k.startsWith("@") || k.startsWith("on") || k.startsWith("grab:")) continue;
