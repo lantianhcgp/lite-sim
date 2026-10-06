@@ -6,7 +6,10 @@ import { ModuleLoader } from "/web/runtime/moduleloader.js";
 
 const $ = s => document.querySelector(s);
 const rep = new Reporter({ endpoint: "/api/logs" });
-let mocks = createSysMocks(rep);
+// 真机语义：app 进程持续，$app 全局唯一、模块只加载一次（pages_array/current_uri
+// 是模块级变量）。所以 mocks 与 ModuleLoader 长期持有，只有「重置」才换新的。
+let mocks = null;
+let loader = null;
 let source = null;          // { project, files, base }
 let issues = [];            // 最近一次体检结果
 let currentPage = null;     // Page 实例
@@ -179,6 +182,29 @@ function runCheck() {
 }
 
 // ============================================================ 运行页面
+// 长期运行时：mocks（$app/@system.* 全局）+ 模块加载器缓存，跨页共享
+function ensureRuntime() {
+  if (mocks) return;
+  mocks = createSysMocks(rep, {
+    onNavigate: (uri) => {
+      if (!uri || uri === currentRel) return;
+      const target = PAGES.find(p => p === uri || p.endsWith(uri.replace(/^\//, "")));
+      if (target && source && source.files[target + ".hml"]) {
+        rep.lifecycle(currentRel, "router → " + uri, "模拟器跟随跳转");
+        setTimeout(() => runPage(target), 60);
+      }
+    },
+  });
+  loader = new ModuleLoader(source.files, { reporter: rep, mocks, project: source.project });
+}
+// 重置 = 真机的杀进程重开：换掉 $app 全局与模块缓存
+function resetRuntime() {
+  if (mocks && mocks.clearAll) mocks.clearAll();
+  mocks = null; loader = null;
+  ensureRuntime();
+  rep.lifecycle("runtime", "reset", "$app / @system.* / 模块缓存已重建（等价杀进程）");
+}
+
 function pickPageFiles(rel) {
   const base = rel;
   return {
@@ -202,23 +228,12 @@ function runPage(rel) {
       message: "该页面没有 hml 源文件", hint: "检查 pages 目录名与 config.json 注册", file: rel });
     return;
   }
-  // mocks 在每次运行时重建（清空 storage/file/router 栈，模拟冷启动）
-  // onNavigate：源码里 router.push/replace/back 会真的切到目标页面
-  mocks = createSysMocks(rep, {
-    onNavigate: (uri) => {
-      if (!uri || uri === currentRel) return;
-      const target = PAGES.find(p => p === uri || p.endsWith(uri.replace(/^\//, "")));
-      if (target && source && source.files[target + ".hml"]) {
-        rep.lifecycle(currentRel, "router → " + uri, "模拟器跟随跳转");
-        setTimeout(() => runPage(target), 60);
-      }
-    },
-  });
+  ensureRuntime();
   rep.lifecycle(rel, "load", `载入 ${f.hml.length}B hml / ${f.css.length}B css / ${f.jsSrc.length}B js`);
 
   let def;
   try {
-    const loader = new ModuleLoader(source.files, { reporter: rep, mocks: mockProxy(), project: source.project });
+    ensureRuntime();
     def = loader.loadEntry(f.js);
     if (!def || typeof def !== "object") throw new Error("export default 不是对象");
   } catch (e) {
@@ -245,8 +260,7 @@ function runPage(rel) {
   renderCounts(); buildChips(); renderList(); renderLog();
 }
 
-// moduleloader 需要的 mock（createSysMocks 已把 6 个 @system.* 铺在顶层）
-function mockProxy() { return mocks; }
+
 
 function markActivePage(rel) {
   document.querySelectorAll("#pages button").forEach(b => b.classList.toggle("on", b.dataset.rel === rel));
@@ -284,14 +298,14 @@ $("#btnSysBack").onclick = () => {
 
 $("#btnCheck").onclick = runCheck;
 $("#btnRun").onclick = () => runPage(currentRel);
-$("#btnReset").onclick = () => runPage(currentRel);
-$("#btnReload").onclick = async () => { await loadProject(); buildPageButtons(); runCheck(); runPage(currentRel); };
+$("#btnReset").onclick = () => { resetRuntime(); runPage(currentRel); };
+$("#btnReload").onclick = async () => { await loadProject(); resetRuntime(); buildPageButtons(); runCheck(); runPage(currentRel); };
 $("#btnClear").onclick = () => { rep.clear(); renderCounts(); buildChips(); renderList(); renderLog(); };
 $("#btnCopy").onclick = () => copy(rep.exportText(rep.filter(filter)), "已复制完整报告");
 $("#q").oninput = e => { filter.q = e.target.value.trim(); renderList(); };
 $("#chkGrid").onchange = e => { $("#gridLine").style.display = e.target.checked ? "" : "none"; };
 $("#chkDanger").onchange = e => { $("#dangerLine").style.display = e.target.checked ? "" : "none"; };
-$("#project").onchange = async () => { await loadProject(); buildPageButtons(); runCheck(); runPage(currentRel); };
+$("#project").onchange = async () => { await loadProject(); resetRuntime(); buildPageButtons(); runCheck(); runPage(currentRel); };
 
 // ============================================================ 冒烟测试 ?smoke=1
 // headless/一键验证：体检 → 运行 index → 点"+ 添加" → 断言跳到 edit → 点返回
@@ -355,6 +369,159 @@ async function smoke() {
   rep.flushNow();
 }
 
+
+// ============================================================ 完整旅程 ?journey=1
+// 模拟真实用户把所有功能点一遍：新建 → 输入 → 保存 → 勾选 → 折叠 → 长按 → 删除 → 备忘 → 返回
+async function journey() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const step = (name, ok, detail) => rep.push({
+    kind: "event", level: ok ? "info" : "error",
+    code: ok ? "JRN_OK" : "JRN_FAIL",
+    title: `${ok ? "通过" : "失败"} · ${name}`,
+    message: detail || "", hint: ok ? "" : "该交互路径在模拟器下不通",
+    file: "journey", line: 0,
+  });
+  const scr = () => ($("#screen").textContent || "").replace(/\s+/g, " ");
+  const at = (p) => (currentRel || "").includes(p);
+  const btns = () => Array.from(document.querySelectorAll("#screen .nav-btn, #screen .del-btn, #screen .c-btn"));
+  const clickBtn = (kw) => {
+    for (const e of btns()) if (!kw || (e.textContent || "").includes(kw)) { e.click(); return true; }
+    return false;
+  };
+  const key = (ch) => {
+    for (const e of document.querySelectorAll("#screen .im-key"))
+      if ((e.textContent || "").trim() === ch) { e.click(); return true; }
+    return false;
+  };
+  const longPressFirstItem = () => {
+    // 排除折叠行：勾选后数据会进「已完成」，首项变成 id=__fold，
+    // 而 onLong 对 __fold 直接 return（不是模拟器 bug，是被测代码的语义）
+    const items = Array.from(document.querySelectorAll("#screen .item-bg"));
+    const target = items.find(e => !/已完成|收起/.test(e.textContent)) || null;
+    if (!target) return false;
+    target.dispatchEvent(new Event("contextmenu", { bubbles: true }));  // Lite longpress → contextmenu
+    return true;
+  };
+  const pressSysBack = () => { const b = $("#btnSysBack"); if (b) { b.click(); return true; } return false; };
+  const has = (t) => scr().includes(t);
+
+  const T = [];
+  const rec = () => T.push({ rel: currentRel, text: scr().slice(0, 120), errs: rep.counts.error });
+
+  // ---------- 阶段 1：新建一条待办 ----------
+  runPage("pages/index/index"); await sleep(180); rec();
+  step("1.1 index 渲染(空态)", has("还没有待办"), scr().slice(0, 70));
+
+  step("1.2 点「+ 添加」", clickBtn("添加"), `clicked=${at("edit")}`);
+  await sleep(340); rec();
+  step("1.3 跳转 edit", at("edit"), `current=${currentRel}`);
+
+  step("1.4 点「打开键盘」", clickBtn("打开键盘"), `clicked=${at("keyboard")}`);
+  await sleep(340); rec();
+  step("1.5 跳转 keyboard", at("keyboard"), `current=${currentRel}`);
+
+  // 打字：L-I-T-E
+  let typed = "";
+  const trace = [];
+  const state = () => {
+    const p = currentPage || {};
+    const dom = ((document.querySelector("#screen .edit-text") || {}).textContent || "").trim();
+    return `typeData=${JSON.stringify(p._raw && p._raw.typeData)} disp=${JSON.stringify(p._raw && p._raw.display)} dom=${JSON.stringify(dom)} q=${p.renderQueued ? 1 : 0}`;
+  };
+  for (const ch of ["l", "i", "t", "e"]) {
+    const s0 = state();
+    const okk = key(ch);
+    if (okk) typed += ch;
+    await sleep(220);
+    const s1 = state();
+    trace.push(`${ch}:${okk ? "hit" : "MISS"} [${s0}] → [${s1}]`);
+  }
+  await sleep(600);
+  const shown = ((document.querySelector("#screen .edit-text") || {}).textContent || "").trim();
+  step("1.6 键盘打字 LITE", typed === "lite", `按下=${typed}`);
+  step("1.7 输入框实时显示", shown === "lite", `显示="${shown}"\n${trace.join("\n")}`);
+  rec();
+
+  // 点搜索（图标按钮，无文字 → 取候选词区右侧的 search 容器）
+  let searched = false;
+  const searchEl = document.querySelector("#screen .im-sub-container");
+  if (searchEl) {
+    // 搜索按钮是该行最后一个 div（含 image/search 图标）
+    const kids = Array.from(searchEl.children);
+    const cand = kids[kids.length - 1];
+    if (cand) { cand.click(); searched = true; }
+  }
+  await sleep(400); rec();
+  step("1.8 点搜索返回", searched && at("edit"), `searched=${searched} current=${currentRel}`);
+
+  // edit 页用 .preview-text 显示（.edit-text 是 keyboard 页的）
+  const editShown = (($("#screen .preview-text") || {}).textContent || "").trim();
+  const editEmpty = !!$("#screen .preview-empty");
+  step("1.9 键盘文本回传 edit", editShown.includes("lite") || !editEmpty,
+    `preview="${editShown.slice(0, 40)}" 空态提示=${editEmpty}`);
+
+  step("1.10 点「保存」", clickBtn("保存"), `clicked`);
+  await sleep(480); rec();
+  step("1.11 保存返回 index", at("index"), `current=${currentRel}`);
+  step("1.12 列表已有数据", !has("还没有待办"), scr().slice(0, 90));
+
+  // ---------- 阶段 2：列表交互 ----------
+  const firstItem = document.querySelector("#screen .item-bg");
+  if (firstItem) { firstItem.click(); }
+  await sleep(300); rec();
+  step("2.1 点列表项切换完成", has("已完成") || has("全部完成"), scr().slice(0, 90));
+
+  // 折叠行（已完成 N）
+  const fold = Array.from(document.querySelectorAll("#screen .item")).find(e => /已完成|收起/.test(e.textContent));
+  if (fold) fold.querySelector(".item-bg, div").click();
+  await sleep(300); rec();
+  step("2.2 折叠/展开", true, `折叠行=${!!fold} 文案含收起=${has("收起")}`);
+
+  // 长按 → 编辑页
+  const lp = longPressFirstItem();
+  await sleep(420); rec();
+  step("2.3 长按进编辑页", lp && at("edit"), `lp=${lp} current=${currentRel}`);
+
+  if (at("edit")) {
+    const del = clickBtn("删除");
+    await sleep(460); rec();
+    step("2.4 删除并返回", del && at("index"), `current=${currentRel}`);
+    step("2.5 数据已清空", has("还没有待办"), scr().slice(0, 70));
+  } else {
+    step("2.4 删除并返回", false, "长按未进编辑页，跳过删除");
+    step("2.5 数据已清空", false, "未执行删除");
+  }
+
+  // ---------- 阶段 3：备忘录 ----------
+  runPage("pages/index/index"); await sleep(160);
+  step("3.1 点「备忘」", clickBtn("备忘"), `clicked=${at("note")}`);
+  await sleep(340); rec();
+  step("3.2 跳转 note", at("note"), `current=${currentRel}`);
+
+  if (at("note")) {
+    step("3.3 note 渲染", has("备忘") || has("暂无"), scr().slice(0, 70));
+    step("3.4 点「新建」", clickBtn("新建"), `clicked`);
+    await sleep(340); rec();
+    step("3.5 note 新建进 edit", at("edit"), `current=${currentRel}`);
+    pressSysBack(); await sleep(340); rec();
+    step("3.6 系统返回 note", at("note"), `current=${currentRel}`);
+    pressSysBack(); await sleep(340); rec();
+    step("3.7 系统返回上一页", !at("keyboard"), `current=${currentRel}`);
+  } else {
+    for (const n of ["3.3 note 渲染", "3.4 点「新建」", "3.5 note 新建进 edit", "3.6 系统返回 note", "3.7 系统返回上一页"])
+      step(n, false, "未进入 note");
+  }
+
+  // ---------- 汇总 ----------
+  const errs = rep.issues.filter(i => i.level === "error" && !i.code.startsWith("JRN") && !i.code.startsWith("SMOKE"))
+    .map(i => `${i.code}:${(i.title || "").slice(0, 40)}`);
+  step("全程 0 error", errs.length === 0, errs.join(" | ") || "0 条");
+  rep.push({ kind: "lifecycle", level: "info", code: "JRN_DONE", title: "旅程测试完成",
+    message: `error=${rep.counts.error} warn=${rep.counts.warn} info=${rep.counts.info} 去重=${rep.stats().deduped}`,
+    hint: "", file: "journey", line: 0 });
+  rep.flushNow();
+}
+
 // 未捕获异常兜底（跑源码时的漏网之鱼）
 window.addEventListener("error", e => {
   rep.exception(e.error || new Error(e.message), { page: currentRel, event: "window.onerror", file: e.filename || "" });
@@ -365,6 +532,8 @@ window.addEventListener("unhandledrejection", e => {
 
 // ============================================================ 启动
 (async function boot() {
+  const qs = new URLSearchParams(location.search);
+  if (qs.get("shot")) document.body.classList.add("shot");   // 纯画布截图模式
   const names = await listProjects();
   const sel = $("#project");
   sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join("");
@@ -375,10 +544,47 @@ window.addEventListener("unhandledrejection", e => {
   // 首次自动体检（零操作就能看到价值）
   if (source && source.files) runCheck();
   // 自动运行默认页面：打开就能看到渲染 + 运行期日志，无需手动点
+  const wantPage = new URLSearchParams(location.search).get("page");
+  if (wantPage && source && source.files[wantPage + ".hml"]) currentRel = wantPage;
   if (source && source.files) runPage(currentRel);
   // ?smoke=1 → 跑一遍冒烟（headless 验证 / 一键回归）
-  if (new URLSearchParams(location.search).get("smoke")) {
-    setTimeout(() => smoke(), 400);
+  if (qs.get("smoke")) setTimeout(() => smoke(), 400);
+  if (qs.get("journey")) setTimeout(() => journey(), 500);
+  // ?debug=1 → 把画布内每个元素的实际渲染矩形报进日志（排查错位/溢出）
+  if (qs.get("debug")) {
+    setTimeout(() => {
+      const frame = $("#frame"), scr = $("#screen");
+      if (!frame || !scr) return;
+      const fb = frame.getBoundingClientRect();
+      rep.push({ kind: "lifecycle", level: "info", code: "DEBUG_FRAME",
+        title: `frame ${Math.round(fb.width)}x${Math.round(fb.height)} @${Math.round(fb.left)},${Math.round(fb.top)}`,
+        message: "", hint: "", file: "debug", line: 0 });
+      const walk = (el, depth) => {
+        const r = el.getBoundingClientRect();
+        const cls = el.className || el.tagName.toLowerCase();
+        const txt = (el.childNodes.length && Array.from(el.childNodes).some(n => n.nodeType === 3 && n.textContent.trim()))
+          ? " «" + Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join("").slice(0, 24) + "»" : "";
+        rep.push({
+          kind: "lifecycle", level: "info", code: "DEBUG_RECT",
+          title: `${"  ".repeat(depth)}<${el.tagName.toLowerCase()}.${String(cls).split(" ").join(".")}>`,
+          message: `x=${Math.round(r.left - fb.left)}..${Math.round(r.right - fb.left)} y=${Math.round(r.top - fb.top)}..${Math.round(r.bottom - fb.top)} (${Math.round(r.width)}x${Math.round(r.height)})${txt}`,
+          hint: "", file: "debug", line: 0, context: { depth },
+        });
+        for (const c of el.children) walk(c, depth + 1);
+      };
+      walk(scr, 0);
+      // 超出 frame 的元素
+      const all = scr.querySelectorAll("*");
+      let over = 0;
+      for (const el of all) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom - fb.top > fb.height + 1 || r.right - fb.left > fb.width + 1) over++;
+      }
+      rep.push({ kind: "lifecycle", level: over ? "warn" : "info", code: "DEBUG_OVERFLOW",
+        title: over ? `${over} 个元素超出 frame 边界` : "无元素溢出 frame",
+        message: `frame ${Math.round(fb.width)}x${Math.round(fb.height)}`, hint: "", file: "debug", line: 0 });
+      rep.flushNow();
+    }, 700);
   }
   // 上报状态
   const st = $("#upState");

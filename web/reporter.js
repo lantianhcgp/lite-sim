@@ -75,6 +75,20 @@ export class Reporter {
       context: {},
     }, iss);
     rec.level = LEVELS[rec.level] === undefined ? "error" : rec.level;
+
+    // 去重：同 code+title+file 在 6 秒内只记一次（error 不去重，避免漏报）
+    if (rec.level !== "error") {
+      const k = rec.code + "|" + rec.title + "|" + (rec.file || "");
+      const now = Date.now();
+      const last = this._seen && this._seen.get(k);
+      if (last && now - last < 6000) {
+        this._dup = (this._dup || 0) + 1;
+        return null;                      // 静默合并
+      }
+      if (!this._seen) this._seen = new Map();
+      this._seen.set(k, now);
+    }
+
     this.issues.push(rec);
     this.counts[rec.level] = (this.counts[rec.level] || 0) + 1;
     if (this.issues.length > this.max) {
@@ -203,7 +217,8 @@ export class Reporter {
   }
 
   stats() {
-    return Object.assign({ total: this.issues.length, since: this.startedAt }, this.counts);
+    return Object.assign({ total: this.issues.length, since: this.startedAt,
+      deduped: this._dup || 0 }, this.counts);
   }
 
   // 一键复制（给 AI 用的紧凑格式）

@@ -162,9 +162,9 @@ export function createSysMocks(reporter, opts = {}) {
 
   const mock = {
     router: def({
-      push(o) { rec("router.push", "call", o); routerStack.push(o && o.uri); routeParams = (o && o.params) || null; navigate(o && o.uri); },
-      replace(o) { rec("router.replace", "call", o); if (o && o.uri) routerStack[routerStack.length - 1] = o.uri; routeParams = (o && o.params) || routeParams; navigate(o && o.uri); },
-      back() { rec("router.back", "call", null); if (routerStack.length > 1) routerStack.pop(); routeParams = null; navigate(routerStack[routerStack.length - 1]); },
+      push(o) { rec("router.push", "call", o); routerStack.push(o && o.uri); routeParams = (o && o.params) || null; notifyUri(); navigate(o && o.uri); },
+      replace(o) { rec("router.replace", "call", o); if (o && o.uri) routerStack[routerStack.length - 1] = o.uri; routeParams = (o && o.params) || routeParams; notifyUri(); navigate(o && o.uri); },
+      back() { rec("router.back", "call", null); if (routerStack.length > 1) routerStack.pop(); routeParams = null; notifyUri(); navigate(currentUri()); },
       getParams() { rec("router.getParams", "call", routeParams); return routeParams; },
       getState() { return { stack: routerStack.slice() }; },
     }),
@@ -230,6 +230,13 @@ export function createSysMocks(reporter, opts = {}) {
 
   // ---- $app 全局对象（Lite 运行时提供，common/router 直接裸用）
   let paramStore = {}, dataStore = {};
+  // getCurrentUri 是订阅语义：common/router.js 在模块顶层注册一次，
+  // 之后每次页面变化都要回调更新 current_uri —— 只回调一次的话
+  // pages_array 会永远装同一个初始 uri，back 就永远回首页（实测旅程 1.8 断在这里）
+  const uriWatchers = [];
+  const currentUri = () => routerStack[routerStack.length - 1] || "";
+  const notifyUri = () => { const u = currentUri(); for (const cb of uriWatchers) { try { cb(u); } catch (e) {} } };
+
   const appGlobal = {
     addAllParams(o) { rec("app.addAllParams", "call", o); Object.assign(paramStore, o || {}); },
     getAllParams(cb) { rec("app.getAllParams", "call", null); cb && cb(Object.assign({}, paramStore)); },
@@ -237,7 +244,10 @@ export function createSysMocks(reporter, opts = {}) {
     getData(cb) { rec("app.getData", "call", null); cb && cb(Object.assign({}, dataStore)); },
     cleanData() { rec("app.cleanData", "call", null); dataStore = {}; },
     setData(o) { Object.assign(dataStore, o || {}); },
-    getCurrentUri(cb) { cb && cb(routerStack[routerStack.length - 1] || ""); },
+    getCurrentUri(cb) {
+      if (typeof cb === "function") { uriWatchers.push(cb); cb(currentUri()); }   // 注册 + 立即回当前
+      return currentUri();
+    },
     getRouterUriList(cb) { cb && cb(routerStack.slice()); },
     writeRouterUriList(list) { routerStack.length = 0; for (const u of (list || [])) routerStack.push(u); },
     onPageChange(uri) { rec("app.onPageChange", "call", { uri }); },
@@ -367,7 +377,11 @@ export class Page {
   scheduleRender() {
     if (this.destroyed || this.renderQueued) return;
     this.renderQueued = true;
-    requestAnimationFrame(() => { this.renderQueued = false; this.renderNow(); });
+    // 用 setTimeout 而不是 requestAnimationFrame：headless / 后台标签页里 rAF 会停摆，
+    // 一旦卡住 renderQueued 永远为 true，后续所有 scheduleRender 被拦截、界面就冻结了
+    // （旅程实测：typeData 到了 "lite" 但 DOM 停在 "l"）。setTimeout(0) 也更贴近
+    // Lite「数据变化即刷新」的语义。
+    setTimeout(() => { this.renderQueued = false; this.renderNow(); }, 0);
   }
 
   renderNow() {
@@ -401,19 +415,9 @@ export class Page {
 
     const a = node.attrs || {};
 
-    // if / elif / else
-    if (a.if !== undefined && a.if !== true) {
-      let cond;
-      try { cond = this.evalExpr(String(a.if), scope); } catch (e) { cond = false; }
-      if (!truthy(cond)) return;
-    }
-    if (a.show !== undefined && a.show !== true) {
-      let cond;
-      try { cond = this.evalExpr(String(a.show), scope); } catch (e) { cond = false; }
-      if (!truthy(cond)) { /* show=false 仍构建，但隐藏 */ }
-    }
-
-    // for 循环
+    // for 必须最先处理：它建立子作用域（$item / $index / 循环变量），
+    // 同一元素上的 if/show（如 keyboard 的 show="{{ !!$item }}") 要在子作用域里求值，
+    // 否则 $item is not defined 会中断整棵树渲染。
     if (a.for !== undefined && a.for !== true) {
       const it = this._evalFor(String(a.for), scope);
       if (!it) return;
@@ -425,13 +429,26 @@ export class Page {
         const holder = document.createElement("div");
         holder.style.display = "contents";
         domParent.appendChild(holder);
+        // 递归时去掉 for，保留 if/show —— 它们将在 childScope 中求值
         this._renderNode({ tag: node.tag, attrs: strip(a, ["for"]), children: node.children, text: node.text }, holder, childScope);
       }
       return;
     }
 
+    // if / elif / else（此刻 scope 已是 for 建立的子作用域）
+    if (a.if !== undefined && a.if !== true) {
+      let cond;
+      try { cond = this.evalExpr(String(a.if), scope); } catch (e) { cond = false; }
+      if (!truthy(cond)) return;
+    }
+    let hideByShow = false;
+    if (a.show !== undefined && a.show !== true) {
+      try { hideByShow = !truthy(this.evalExpr(String(a.show), scope)); } catch (e) { hideByShow = true; }
+    }
+
     // 普通元素
     const el = document.createElement(mapTag(node.tag));
+    if (hideByShow) el.style.display = "none";   // Lite: show=false 仍构建节点但不显示
     this._applyAttrs(node, el, scope);
     this._bindEvents(node, el, scope);
     domParent.appendChild(el);
@@ -483,7 +500,7 @@ export class Page {
     const cls = [], style = [];
     for (const k of Object.keys(a)) {
       const v = a[k];
-      if (k === "class") { cls.push(String(v)); continue; }
+      if (k === "class") { for (const c of String(v).split(/\s+/)) if (c) cls.push(c); continue; }  // "item tail" 必须拆开
       if (k === "style") { style.push(String(v)); continue; }
       if (k === "id") { el.id = String(v); continue; }
       if (k === "ref") { this._ref(String(v), el); continue; }
@@ -495,13 +512,21 @@ export class Page {
       if (k.startsWith("@") || k.startsWith("on") || k.startsWith("grab:")) continue;
       el.setAttribute(k, this._bindStr(String(v), scope));
     }
-    // 应用该 class 的 css（Lite 同名类叠加）
+    // 应用该 class 的 css（Lite 同名类叠加，后者覆盖前者）
     const cssText = this._cssFor(cls);
-    if (cssText) {
-      const st = document.createElement("style");
-      // 每次渲染生成作用域样式（简单可靠；量级可控）
-      st.textContent = cssText;
-      el.setAttribute("style", (el.getAttribute("style") || "") + ";" + cssTextToInline(cssText));
+    let inline = cssText ? cssTextToInline(cssText) : "";
+
+    // Lite 盒模型：div/stack/list 等容器默认 display:flex（浏览器默认是 block，
+    // 不补这句则 flex-direction/justify-content/align-items 全部无效 —— 实测按钮会纵向堆叠）
+    if (LITE_FLEX_TAGS.has(node.tag) && !/display\s*:/.test(inline)) {
+      inline = "display:flex;" + inline;
+      // Lite 的 list 语义是纵向列表：浏览器 flex 默认 row，子项会横向排并溢出
+      if (node.tag === "list" && !/flex-direction\s*:/.test(inline)) {
+        inline += ";flex-direction:column";
+      }
+    }
+    if (inline) {
+      el.setAttribute("style", (el.getAttribute("style") || "") + ";" + inline);
     }
     if (cls.length) el.className = cls.join(" ");
     if (style.length) el.setAttribute("style", (el.getAttribute("style") || "") + ";" + style.join(";"));
@@ -540,7 +565,13 @@ export class Page {
         this.rep && this.rep.event("missing", { handler: fnName, event: ev, file: this.name, line: 0 }, "error");
         continue;
       }
-      this.rep && this.rep.event("bind", { handler: fnName, event: ev, file: this.name });
+      // 只在本页面实例首次绑定时上报：innerHTML 重建会重新走这里，重复报会刷屏
+      const bindKey = ev + ":" + fnName;
+      if (!this._boundKeys) this._boundKeys = new Set();
+      if (!this._boundKeys.has(bindKey)) {
+        this._boundKeys.add(bindKey);
+        this.rep && this.rep.event("bind", { handler: fnName, event: ev, file: this.name });
+      }
       el.addEventListener(domEv, (domEvent) => {
         const key = ev + ":" + fnName;
         const n = (this.fireCounts.get(key) || 0) + 1;
@@ -599,6 +630,9 @@ export class Page {
 }
 
 // ================================================================ 工具
+// Lite 中默认按 flex 布局的容器（浏览器默认是 block，必须显式补）
+const LITE_FLEX_TAGS = new Set(["div", "stack", "list", "list-item", "tabs", "tab-content", "swiper"]);
+
 function mapTag(tag) {
   switch (tag) {
     case "text": return "div";

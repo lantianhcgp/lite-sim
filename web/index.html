@@ -52,9 +52,9 @@ main{flex:1;display:flex;min-height:0}
 #pages button.on{border-color:var(--blue);color:#fff;background:rgba(31,113,255,.16)}
 
 /* 右：报错面板 */
-#side{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel)}
+#side{flex:1;display:flex;flex-direction:column;min-width:0;max-width:100%;overflow:hidden;background:var(--panel)}
 #sideTop{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;
-  flex-wrap:wrap;align-items:center}
+  flex-wrap:wrap;align-items:center;min-width:0}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
 .chip{font-size:12px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;
   background:var(--panel2);cursor:pointer;color:var(--dim)}
@@ -65,19 +65,20 @@ main{flex:1;display:flex;min-height:0}
 #counts b{font-size:15px}
 #counts .e b{color:var(--err)} #counts .w b{color:var(--warn)} #counts .i b{color:var(--info)}
 
-#list{flex:1;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
+#list{flex:1;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:8px;min-width:0;max-width:100%}
 .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
-  padding:9px 11px;border-left-width:3px}
+  padding:9px 11px;border-left-width:3px;min-width:0;max-width:100%;overflow:hidden}
 .card.error{border-left-color:var(--err)} .card.warn{border-left-color:var(--warn)}
 .card.info{border-left-color:var(--info)}
-.card .row1{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.card .row1{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;min-width:0}
 .lvl{font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;letter-spacing:.5px}
 .card.error .lvl{background:rgba(255,90,95,.15);color:var(--err)}
 .card.warn .lvl{background:rgba(245,165,36,.15);color:var(--warn)}
 .card.info .lvl{background:rgba(91,157,255,.14);color:var(--info)}
 .code{font-size:11px;color:var(--dim2);font-family:ui-monospace,monospace}
-.card .title{font-weight:600;font-size:13.5px;flex:1;min-width:0;word-break:break-word}
-.card .loc{font-size:11px;color:var(--dim);font-family:ui-monospace,monospace}
+.card .title{font-weight:600;font-size:13.5px;flex:1 1 0;min-width:0;word-break:break-word;overflow-wrap:anywhere}
+.card .loc{font-size:11px;color:var(--dim);font-family:ui-monospace,monospace;
+  max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
 .card .msg{margin-top:6px;font-size:12.5px;color:#b7bec9;word-break:break-word;white-space:pre-wrap}
 .card .hint{margin-top:7px;font-size:12.5px;background:rgba(62,207,142,.08);
   border:1px solid rgba(62,207,142,.22);border-radius:7px;padding:7px 9px;color:#9fe3c4}
@@ -110,6 +111,16 @@ footer{display:flex;gap:10px;align-items:center;padding:7px 12px;border-top:1px 
   border:1px solid var(--line);border-radius:9px;padding:9px 16px;font-size:13px;z-index:9999;
   opacity:0;transition:opacity .2s}
 .toast.show{opacity:1}
+
+/* ?shot=1 纯画布模式：视口设为 412x484 截图，用于和真实表盘截图做视觉对比 */
+body.shot{background:#000;overflow:hidden}
+body.shot header,body.shot #side,body.shot footer,
+body.shot #stageBar,body.shot #pages,body.shot #btnSysBack,
+body.shot #gridLine,body.shot .toast{display:none!important}
+body.shot main{display:block;height:100%}
+body.shot #stage{padding:0;border:0;overflow:visible;width:412px;height:484px;gap:0}
+body.shot #frameWrap{position:static}
+body.shot #frame{width:412px;height:484px;border-radius:100px;box-shadow:none;margin:0}
 </style>
 </head>
 <body>

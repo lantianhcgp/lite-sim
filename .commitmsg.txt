@@ -1,14 +1,34 @@
-docs: README + storage 128B 红线 + MCP skill
+feat: 布局对齐真机 + 完整旅程测试 25/25（0 error）
 
-- README.md：启动方式、能查/不能查的边界、三部分说明、MCP 工具表、
-  测试命令、冒烟步骤、目录结构、已知边界
-- storage.set 加 128B 硬限制检查（超限报 STORAGE_OVERSIZE +
-  指向 @system.file 的修复建议）
-- 新建 skill `lite-sim-mcp`：连接四要素、8 工具、典型工作流、
-  headless 冒烟命令、7 条实测坑
+布局自检（?shot=1 纯画布 412x484，与真实手表截图并排对比 + 逐元素矩形取证），
+发现并修复 4 个渲染层根因：
 
-最终回归（全绿）：
-  规则体检 30/30 · 模块加载 9/9
-  服务端 health ✓ / MCP sim_status ✓（日志 177 条）/ 静态页 200
-  项目自动发现 6 个：clan elcton elcton-repo lite-watch-starter memo-todo nexuscheckin
-  headless 冒烟 6/6，0 错误 / 5 警告 / 49 信息
+1. Lite 盒模型：div 默认 flex，浏览器默认 block —— 不补 display:flex 则
+   flex-direction/justify-content/align-items 全部无效，实测两按钮纵向堆叠
+   （第二个 x=28..384 y=407..449）、header 标题与计数上下叠、按钮文字顶格。
+   → LITE_FLEX_TAGS 补 display:flex；<list> 补 flex-direction:column
+2. 复合类没拆分：class="item tail" 被当一个类名查 css，`\.item tail\{` 永远
+   匹配不到 → .item.tail 高度只剩内容的 27px（应 51）
+3. for 必须先于 if/show：同一元素上 show="{{ !!$item }}"（keyboard 候选词）
+   在父作用域求值 → $item is not defined 中断整棵树渲染
+   → for 最先建立子作用域，if/show 递归后在子作用域求值
+4. scheduleRender 用 rAF 会冻结：headless/后台标签页 rAF 停摆后
+   renderQueued 永远 true，后续调度全被拦、界面冻在旧值
+   （实测 typeData 到 "lite" 而 DOM 停在 "l"）→ 改 setTimeout(0)
+
+运行时语义修正：
+- $app.getCurrentUri 改订阅式（common/router.js 模块顶层注册一次，之后页面
+  变化回调更新 current_uri；只回调一次会让 pages_array 全装初始值、back 永远
+  回首页 —— 旅程 1.8 实测断在这）
+- mocks 与 ModuleLoader 改为长期持有（真机 app 进程持续、模块只加载一次），
+  每次 runPage 重建会割裂跨页路由状态；仅「重置」按钮才换新（等价杀进程）
+- show=false → display:none（Lite 语义：构建但不显示）
+
+测试：
+- ?shot=1 纯画布截图模式（与真实截图同尺寸对比）
+- ?debug=1 逐元素 getBoundingClientRect 报进日志
+- ?journey=1 完整用户旅程 25 步：新建→键盘打字→搜索回传→保存→勾选→
+  折叠展开→长按→删除→备忘→新建→系统返回，**25/25 通过、0 error**
+- 回归：规则 30/30、模块加载 9/9、冒烟 6/6（0 错误 0 警告）
+
+.gitignore：排除 logs/*.jsonl 与 .token
