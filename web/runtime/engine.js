@@ -22,7 +22,7 @@ export function parseHml(src) {
       i = gt + 1;
       continue;
     }
-    const gt = s.indexOf(">", lt);
+    const gt = findTagEnd(s, lt);     // 必须跳过引号内的 >（如 if="{{ pending > 0 }}"）
     if (gt < 0) break;
     const raw = s.slice(lt + 1, gt);
     const selfClose = raw.trim().endsWith("/");
@@ -42,6 +42,18 @@ export function parseHml(src) {
     stack[stack.length - 1].children.push(node);
   }
   return root;
+}
+
+// 从 '<' 开始找标签真正的 '>'：引号内的 > 不算（hml 属性值里常有 {{ a > b }}）
+function findTagEnd(s, lt) {
+  let quote = null;
+  for (let i = lt + 1; i < s.length; i++) {
+    const c = s[i];
+    if (quote) { if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (c === ">") return i;
+  }
+  return -1;
 }
 
 function parseAttrs(s) {
@@ -76,7 +88,10 @@ function extractExpr(text) {
 // Lite 的 hml 表达式只支持 ES5；这里同样不提供 ES6 能力，跑出错就报错。
 export function makeEvaluator(reporter, pageName) {
   const cache = new Map();
-  return function evalExpr(expr, scope) {
+  return function evalExpr(rawExpr, scope) {
+    // 属性值/文本常以 "{{ expr }}" 形式到达 —— 先剥掉外层花括号再编译
+    let expr = String(rawExpr == null ? "" : rawExpr).trim();
+    if (expr.startsWith("{{") && expr.endsWith("}}")) expr = expr.slice(2, -2).trim();
     let fn = cache.get(expr);
     if (!fn) {
       try {
@@ -104,13 +119,28 @@ export function makeEvaluator(reporter, pageName) {
   };
 }
 
+// HML 静态文案用 &#xXXXX; 实体（构建要求），渲染前必须解码
+export function decodeEntities(s) {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => safeCP(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => safeCP(parseInt(d, 10)))
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+  function safeCP(n) { try { return Number.isFinite(n) ? String.fromCodePoint(n) : ""; } catch (e) { return ""; } }
+}
+
 function truthy(v) {
   if (Array.isArray(v)) return v.length > 0;
   return v !== undefined && v !== null && v !== false && v !== "" && v !== 0;
 }
 
 // ================================================================ @system mock
-export function createSysMocks(reporter) {
+export function createSysMocks(reporter, opts = {}) {
+  // opts.onNavigate(uri)：页面跳转时通知外层切换模拟页面
+  const navigate = (uri) => { if (uri && typeof opts.onNavigate === "function") opts.onNavigate(uri); };
   const logs = [];
   const store = new Map();
   const files = new Map();      // uri -> text
@@ -131,9 +161,9 @@ export function createSysMocks(reporter) {
 
   const mock = {
     router: def({
-      push(o) { rec("router.push", "call", o); routerStack.push(o && o.uri); routeParams = (o && o.params) || null; },
-      replace(o) { rec("router.replace", "call", o); if (o && o.uri) routerStack[routerStack.length - 1] = o.uri; routeParams = (o && o.params) || routeParams; },
-      back() { rec("router.back", "call", null); if (routerStack.length > 1) routerStack.pop(); routeParams = null; },
+      push(o) { rec("router.push", "call", o); routerStack.push(o && o.uri); routeParams = (o && o.params) || null; navigate(o && o.uri); },
+      replace(o) { rec("router.replace", "call", o); if (o && o.uri) routerStack[routerStack.length - 1] = o.uri; routeParams = (o && o.params) || routeParams; navigate(o && o.uri); },
+      back() { rec("router.back", "call", null); if (routerStack.length > 1) routerStack.pop(); routeParams = null; navigate(routerStack[routerStack.length - 1]); },
       getParams() { rec("router.getParams", "call", routeParams); return routeParams; },
       getState() { return { stack: routerStack.slice() }; },
     }),
@@ -146,7 +176,12 @@ export function createSysMocks(reporter) {
       get(o) { rec("file.get", "call", { uri: o.uri }); simRead({ uri: o.uri, success: o.success, fail: o.fail }); },
       readText(o) { rec("file.readText", "call", { uri: o.uri, position: o.position }); simRead(o); },
       writeText(o) { rec("file.writeText", "call", { uri: o.uri, len: (o.text || "").length }); files.set(o.uri, (o.text || "")); setTimeout(() => o.success && o.success(), 0); },
-      access(o) { const ok = files.has(o.uri); rec("file.access", ok ? "ok" : "fail", { uri: o.uri, code: ok ? 0 : 301 }); setTimeout(() => ok ? (o.success && o.success()) : (o.fail && o.fail({}, 301)), 0); },
+      access(o) {
+        const ok = files.has(o.uri);
+        // detail 携带 code：reporter 靠它区分 301（正常）与真错误
+        rec("file.access", ok ? "ok" : "fail", { uri: o.uri }, { code: ok ? 0 : 301 });
+        setTimeout(() => ok ? (o.success && o.success()) : (o.fail && o.fail({}, 301)), 0);
+      },
       list(o) { rec("file.list", "call", o); setTimeout(() => o.success && o.success({ fileList: [] }), 0); },
     },
     vibrator: { vibrate(o) { rec("vibrator", "call", o); } },
@@ -160,7 +195,7 @@ export function createSysMocks(reporter) {
     const full = files.has(o.uri) ? files.get(o.uri) : null;
     if (full === null) {
       const code = 301;
-      setTimeout(() => { rec("file.readText", "fail", { uri: o.uri }, { code }); o.fail && o.fail({}, code); }, 0);
+      setTimeout(() => { rec("file.readText", "fail", { uri: o.uri }, { code: 301 }); o.fail && o.fail({}, 301); }, 0);
       return;
     }
     const pos = o.position || 0, len = o.length || full.length;
@@ -391,7 +426,7 @@ export class Page {
     if (ex && ex.whole !== undefined) {
       let v;
       try { v = this.evalExpr(ex.whole, scope); } catch (e) { v = ""; }
-      domParent.appendChild(document.createTextNode(fmt(v)));
+      domParent.appendChild(document.createTextNode(decodeEntities(fmt(v))));
       return;
     }
     if (ex && ex.parts) {
@@ -400,20 +435,30 @@ export class Page {
         if (p.lit !== undefined) out += p.lit;
         else { try { out += fmt(this.evalExpr(p.expr, scope)); } catch (e) { /* 已报 */ } }
       }
-      domParent.appendChild(document.createTextNode(out));
+      domParent.appendChild(document.createTextNode(decodeEntities(out)));
       return;
     }
-    domParent.appendChild(document.createTextNode(node.text || ""));
+    domParent.appendChild(document.createTextNode(decodeEntities(node.text || "")));
   }
 
-  _evalFor(expr, scope) {
-    // 形式: array | value in array | (i, value) in array
+  _evalFor(rawExpr, scope) {
+    // 属性值形如 "{{ (idx, it) in view }}" —— 必须先剥外层花括号再解析，
+    // 否则正则不匹配、会退化成整串求值并抛 idx is not defined
+    let expr = String(rawExpr == null ? "" : rawExpr).trim();
+    if (expr.startsWith("{{") && expr.endsWith("}}")) expr = expr.slice(2, -2).trim();
     let m;
-    if ((m = /^\((\w+)\s*,\s*(\w+)\)\s+in\s+(.+)$/.exec(expr))) return { names: [m[1], m[2]], arr: arr(this.evalExpr(m[3], scope)) };
-    if ((m = /^(\w+)\s+in\s+(.+)$/.exec(expr))) return { names: [m[1]], arr: arr(this.evalExpr(m[2], scope)) };
-    const v = this.evalExpr(expr, scope);
-    return Array.isArray(v) ? { names: ["$item"], arr: v } : null;
-    function arr(x) { return Array.isArray(x) ? x : []; }
+    if ((m = /^\((\w+)\s*,\s*(\w+)\)\s+in\s+(.+)$/.exec(expr))) {
+      return { names: [m[1], m[2]], arr: toArr(this.evalExpr(m[3], scope)) };
+    }
+    if ((m = /^(\w+)\s+in\s+(.+)$/.exec(expr))) {
+      return { names: [m[1]], arr: toArr(this.evalExpr(m[2], scope)) };
+    }
+    // 纯数组表达式
+    if (/^[\w$.\[\]]+$/.test(expr)) {
+      return { names: ["$item"], arr: toArr(this.evalExpr(expr, scope)) };
+    }
+    return null;
+    function toArr(x) { return Array.isArray(x) ? x : []; }
   }
 
   _applyAttrs(node, el, scope) {
@@ -450,10 +495,10 @@ export class Page {
   _bindStr(v, scope) {
     if (!v.includes("{{")) return v;
     const ex = extractExpr(v);
-    if (ex.whole !== undefined) { try { return fmt(this.evalExpr(ex.whole, scope)); } catch (e) { return ""; } }
+    if (ex.whole !== undefined) { try { return decodeEntities(fmt(this.evalExpr(ex.whole, scope))); } catch (e) { return ""; } }
     let out = "";
     for (const p of ex.parts || []) out += p.lit !== undefined ? p.lit : fmt(safeEval(this, p.expr, scope));
-    return out;
+    return decodeEntities(out);
     function safeEval(pg, e, sc) { try { return pg.evalExpr(e, sc); } catch (err) { return ""; } }
   }
 

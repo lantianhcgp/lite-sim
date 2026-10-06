@@ -139,7 +139,9 @@ export class Reporter {
 
   // @system.* 调用日志（含回调是否执行的监督）
   api(name, args, state, detail = {}) {
-    const level = state === "fail" || state === "timeout" ? "error" : state === "warn" ? "warn" : "info";
+    // 301 = 文件不存在，Lite 上是首次使用的正常初始化路径，不算错误
+    const notFound = state === "fail" && String(detail.code) === "301";
+    const level = notFound ? "warn" : (state === "fail" || state === "timeout" ? "error" : state === "warn" ? "warn" : "info");
     const title = state === "call" ? `API 调用 ${name}(${short(args)})` :
                   state === "ok" ? `${name} 回调成功` :
                   state === "fail" ? `${name} 回调失败` :
@@ -149,8 +151,9 @@ export class Reporter {
       code: state === "timeout" ? "API_NO_CALLBACK" : state === "fail" ? "API_FAIL" : "API_CALL",
       title,
       message: detail.message || (state === "call" ? `参数: ${short(args)}` : ""),
-      hint: state === "timeout" ? "success/fail 回调一个都没走——检查参数格式，或该 API 在 Lite 上需要权限/存在性判断（如 file 301）" :
-            state === "fail" ? `失败码: ${detail.code || "?"} —— 对照 Lite 错误码（301 文件不存在等）` : "",
+      hint: notFound ? "文件还不存在（301）——首次使用/首次保存前属正常，代码应按「不存在 → 用默认值」处理" :
+            state === "timeout" ? "success/fail 回调一个都没走——检查参数格式，或该 API 在 Lite 上需要权限/存在性判断" :
+            state === "fail" ? `失败码: ${detail.code || "?"} —— 对照 Lite 错误码表` : "",
       file: detail.file || "", line: detail.line || 0,
       context: Object.assign({ args: safe(args) }, detail),
     });

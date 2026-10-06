@@ -203,7 +203,17 @@ function runPage(rel) {
     return;
   }
   // mocks 在每次运行时重建（清空 storage/file/router 栈，模拟冷启动）
-  mocks = createSysMocks(rep);
+  // onNavigate：源码里 router.push/replace/back 会真的切到目标页面
+  mocks = createSysMocks(rep, {
+    onNavigate: (uri) => {
+      if (!uri || uri === currentRel) return;
+      const target = PAGES.find(p => p === uri || p.endsWith(uri.replace(/^\//, "")));
+      if (target && source && source.files[target + ".hml"]) {
+        rep.lifecycle(currentRel, "router → " + uri, "模拟器跟随跳转");
+        setTimeout(() => runPage(target), 60);
+      }
+    },
+  });
   rep.lifecycle(rel, "load", `载入 ${f.hml.length}B hml / ${f.css.length}B css / ${f.jsSrc.length}B js`);
 
   let def;
@@ -257,6 +267,21 @@ function buildPageButtons() {
 }
 
 // ============================================================ 事件绑定
+// 系统返回键：Lite 页面靠 onBackPress 拦截（编辑页就是这么设计的）
+$("#btnSysBack").onclick = () => {
+  if (!currentPage) return;
+  const back = currentPage.def && currentPage.def.onBackPress;
+  if (typeof back === "function") {
+    rep.lifecycle(currentRel, "系统返回", "触发 onBackPress");
+    let ret;
+    try { ret = back.call(currentPage); } catch (e) { rep.exception(e, { page: currentRel, event: "onBackPress" }); }
+    if (ret !== true) history.back();
+  } else {
+    rep.lifecycle(currentRel, "系统返回", "页面未拦截，回上一页");
+    if (currentRel !== "pages/index/index") runPage("pages/index/index");
+  }
+};
+
 $("#btnCheck").onclick = runCheck;
 $("#btnRun").onclick = () => runPage(currentRel);
 $("#btnReset").onclick = () => runPage(currentRel);
@@ -267,6 +292,68 @@ $("#q").oninput = e => { filter.q = e.target.value.trim(); renderList(); };
 $("#chkGrid").onchange = e => { $("#gridLine").style.display = e.target.checked ? "" : "none"; };
 $("#chkDanger").onchange = e => { $("#dangerLine").style.display = e.target.checked ? "" : "none"; };
 $("#project").onchange = async () => { await loadProject(); buildPageButtons(); runCheck(); runPage(currentRel); };
+
+// ============================================================ 冒烟测试 ?smoke=1
+// headless/一键验证：体检 → 运行 index → 点"+ 添加" → 断言跳到 edit → 点返回
+async function smoke() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const step = (name, ok, detail) => rep.push({
+    kind: "event", level: ok ? "info" : "error",
+    code: ok ? "SMOKE_OK" : "SMOKE_FAIL",
+    title: `${ok ? "通过" : "失败"} · ${name}`,
+    message: detail || "", hint: ok ? "" : "检查该交互路径",
+    file: "smoke", line: 0,
+  });
+  const text = sel => { const e = $(sel); return e ? e.textContent : ""; };
+  const clickByText = (sel, kw) => {
+    const els = document.querySelectorAll(sel);
+    for (const e of els) if ((e.textContent || "").includes(kw)) { e.click(); return true; }
+    return false;
+  };
+  // 只点真正的按钮元素：空态文案里也有"添加"两个字，按文本匹配会点错
+  const clickBtn = (kw) => {
+    const els = document.querySelectorAll("#screen .nav-btn, #screen .del-btn, #screen .c-btn, #screen .nav-btn-alt");
+    for (const e of els) if (!kw || (e.textContent || "").includes(kw)) { e.click(); return true; }
+    return false;
+  };
+
+  step("加载项目", !!(source && source.files), `文件 ${source ? source.count : 0}`);
+  runCheck();
+  step("规则体检", true, `问题 ${issues.length} 条（error ${issues.filter(i => i.level === "error").length}）`);
+
+  runPage("pages/index/index");
+  await sleep(150);
+  const scr = $("#screen").textContent || "";
+  step("index 渲染", scr.includes("待办"), scr.slice(0, 60));
+
+  // 点击「+ 添加」→ 应触发 router.push → 自动切到 edit
+  const clicked = clickBtn("添加");
+  await sleep(320);
+  const jumped = (currentRel || "").includes("edit");
+  const navLog = (mocks.logs || []).filter(l => String(l.api).startsWith("router.")).slice(-4)
+    .map(l => `${l.api}(${JSON.stringify(l.args).slice(0, 50)})`);
+  step("点「+ 添加」跳转 edit", clicked && jumped,
+    `clicked=${clicked} current=${currentRel} | router日志: ${navLog.join(" , ") || "(无)"}`);
+
+  if (jumped) {
+    await sleep(120);
+    const e2 = $("#screen").textContent || "";
+    step("edit 渲染", e2.length > 0, e2.slice(0, 60));
+    // 编辑页没有返回按钮 —— 走系统返回键（onBackPress），与真机手势一致
+    const backBtn = $("#btnSysBack");
+    backBtn && backBtn.click();
+    await sleep(320);
+    step("系统返回 onBackPress", (currentRel || "").includes("index"), `current=${currentRel}`);
+  }
+
+  const errList = rep.issues.filter(i => i.level === "error" && !i.code.startsWith("SMOKE"))
+    .map(i => `${i.code}:${(i.title || "").slice(0, 46)}`);
+  step("运行期无 error", errList.length === 0, errList.join(" | ") || "0 条");
+  rep.push({ kind: "lifecycle", level: "info", code: "SMOKE_DONE", title: "冒烟测试完成",
+    message: `error ${rep.counts.error} / warn ${rep.counts.warn} / info ${rep.counts.info}`, hint: "",
+    file: "", line: 0 });
+  rep.flushNow();
+}
 
 // 未捕获异常兜底（跑源码时的漏网之鱼）
 window.addEventListener("error", e => {
@@ -287,6 +374,12 @@ window.addEventListener("unhandledrejection", e => {
   renderCounts(); buildChips(); renderList(); renderLog();
   // 首次自动体检（零操作就能看到价值）
   if (source && source.files) runCheck();
+  // 自动运行默认页面：打开就能看到渲染 + 运行期日志，无需手动点
+  if (source && source.files) runPage(currentRel);
+  // ?smoke=1 → 跑一遍冒烟（headless 验证 / 一键回归）
+  if (new URLSearchParams(location.search).get("smoke")) {
+    setTimeout(() => smoke(), 400);
+  }
   // 上报状态
   const st = $("#upState");
   rep.on(() => {
