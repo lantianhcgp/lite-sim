@@ -1,0 +1,32 @@
+feat: 服务端(HTTP+MCP+日志) + 规则体检(30/30 测试通过)
+
+服务端 server/server.py（零第三方依赖）：
+- 静态网页托管 + /api/source 一键拉取被调试项目源码
+- 文件管理 API（读写树删，路径限制在仓库 + ~/hw_watch）
+- 日志落盘 logs/YYYY-MM-DD.jsonl（JSON Lines，网页上报）
+- MCP：POST /mcp，JSON-RPC 2.0 over HTTP，Bearer 32hex token
+  与 lite-widget MCP 同协议，8 个工具：
+  fs_read/fs_write/fs_tree/fs_delete/log_tail/log_clear/sim_status/sim_report
+- 全链路实测通过：health → 网页上报 → MCP log_tail 读回
+
+规则体检 web/checker.js（24 条规则，全部有真机实测依据）：
+- 事件：grab:/on: 前缀静默失效、handler 未实现、长按绑定位置
+- HML：非白名单标签、class 动态绑定、if+for 同元素、list 子节点、
+  list-item 顶层子节点数、裸中文、hml 表达式 ES6(模板字符串/箭头函数)
+- CSS：flex:1、复合选择器、font-family、宽高越界、if 容器无固定高、
+  底部栏缺 padding-bottom(圆角危险区 y>=420)
+- JS：正则字面量、可选链/空值合并/展开、单页 48KB、data 下划线/保留名、
+  大字面量堆风险、pages/ 下定时器无 onDestroy
+- 跨文件：事件绑定 vs 实现、hml+css 配对检查
+
+测试 scripts/test-checker.mjs：30/30 通过
+- 坏样本 24 条规则全命中，每条带 title/hint/file/line
+- 反向断言：.js 的 class 与模板字符串合法（Lite 允许），不得误报
+- memo-todo 20 文件：error 0 条，仅 1 条 warn
+
+本轮修复的误报（测试暴露后逐一修正）：
+- <list 正则把 <list-item 当 <list 匹配（\w 不含连字符）→ 改 [\w-]+
+- class / 模板字符串在 .js 里合法 → 移出 JS 禁用表，仅 hml 表达式禁
+- 公共模块(common/)无生命周期 → 定时器清理只查 pages/
+- 组合类(box box-on)任一带 height 即通过
+- 按钮圆角改查所在容器 bottom-bar 的 padding-bottom

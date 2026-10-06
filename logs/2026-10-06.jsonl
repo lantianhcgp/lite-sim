@@ -1,0 +1,1 @@
+{"kind": "exception", "level": "error", "code": "JS_TYPE_ERROR", "message": "测试：undefined 属性访问", "file": "pages/keyboard/keyboard.js", "line": 179, "hint": "检查 typeData 是否已初始化", "ts": "2026-10-06T13:16:21"}
