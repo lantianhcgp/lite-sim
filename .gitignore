@@ -7,3 +7,4 @@ logs/*.jsonl
 .DS_Store
 *.swp
 node_modules/
+.commitmsg.txt
