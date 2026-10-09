@@ -668,6 +668,48 @@ window.addEventListener("unhandledrejection", e => {
   if (wantPage && source && source.files[wantPage + ".hml"]) currentRel = wantPage;
   if (source && source.files) runPage(currentRel);
   // ?smoke=1 → 跑一遍冒烟（headless 验证 / 一键回归）
+  // ?switch=N → 打开键盘页，连续切 N 次输入模式，逐次记录：模式标签 / 可见键区 / 打字结果
+  if (qs.get("switch")) setTimeout(async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    runPage("pages/keyboard/keyboard");
+    await sleep(700);
+    const labelOf = () => {
+      for (const e of document.querySelectorAll("#screen input")) {
+        const v = (e.getAttribute("value") || "").trim();
+        if (v === "EN" || v === "\u62fc\u97f3" || v === "\u6570\u5b57") return v;
+      }
+      return "?";
+    };
+    const visibleRows = () => Array.from(document.querySelectorAll("#screen .im-button-container"))
+      .filter(c => !/^display:\s*none/.test((c.getAttribute("style") || "").trim()))
+      .map(c => (c.textContent || "").trim()).join(" / ");
+    const press = ch => {
+      for (const e of document.querySelectorAll("#screen .im-key"))
+        if ((e.textContent || "").trim() === ch) { e.click(); return true; }
+      return false;
+    };
+    const out = [];
+    const probes = { "EN": "z", "\u62fc\u97f3": "a", "\u6570\u5b57": "5" };
+    for (let i = 0; i <= Number(qs.get("switch")); i++) {
+      const lb = labelOf();
+      const rows = visibleRows();
+      const ch = probes[lb] || "?";
+      const clicked = press(ch);
+      await sleep(200);
+      const disp = ((document.querySelector("#screen .edit-text") || {}).textContent || "").trim();
+      out.push("#" + i + " mode=" + lb + " rows=[" + rows + "] press " + ch + "=" + clicked + " display=[" + disp + "]");
+      if (i < Number(qs.get("switch"))) {
+        for (const e of document.querySelectorAll("#screen input")) {
+          const v = (e.getAttribute("value") || "").trim();
+          if (v === "EN" || v === "\u62fc\u97f3" || v === "\u6570\u5b57") { e.click(); break; }
+        }
+        await sleep(300);
+      }
+    }
+    rep.push({ kind: "lifecycle", level: "info", code: "SWTEST", title: "\u6a21\u5f0f\u5faa\u73af\u6d4b\u8bd5",
+               message: out.join("  ||  "), hint: "", file: "test", line: 0 });
+  }, 700);
+
   if (qs.get("smoke")) setTimeout(() => smoke(), 400);
   if (qs.get("journey")) setTimeout(() => journey(), 500);
   if (qs.get("pinyin")) setTimeout(() => pinyinTest(), 600);
