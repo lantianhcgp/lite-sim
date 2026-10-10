@@ -669,6 +669,43 @@ window.addEventListener("unhandledrejection", e => {
   if (source && source.files) runPage(currentRel);
   // ?smoke=1 → 跑一遍冒烟（headless 验证 / 一键回归）
   // ?switch=N → 打开键盘页，连续切 N 次输入模式，逐次记录：模式标签 / 可见键区 / 打字结果
+  // ?deltap=1 → 打开课程表详情页，点删除：记录确认框是否渲染 + 是否在 412x484 可视区内
+  if (qs.get("deltap")) setTimeout(async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    runPage("pages/detail/detail");
+    await sleep(500);
+    const scr = document.querySelector("#screen");
+    const s = scr.getBoundingClientRect();
+    const res = ["screen=" + Math.round(s.width) + "x" + Math.round(s.height)];
+    const item = document.querySelector("#screen .action-item");
+    res.push("actionItem=" + (item ? "Y" : "N"));
+    if (item) {
+      const ir = item.getBoundingClientRect();
+      const it = Math.round(ir.top - s.top), ib = Math.round(ir.bottom - s.top);
+      res.push("btn@y=" + it + "-" + ib + " 全可见=" + (it >= 0 && ib <= 484));
+    }
+    if (item) item.click();
+    await sleep(400);
+    const raw = (currentPage && currentPage._raw) || {};
+    res.push("state=" + raw.showDeleteConfirm);
+    const ov = document.querySelector("#screen .overlay");
+    if (!ov) { res.push("overlay=none"); }
+    else {
+      const r2 = ov.getBoundingClientRect();
+      const top = Math.round(r2.top - s.top), left = Math.round(r2.left - s.left);
+      res.push("ov@=" + left + "," + top + " " + Math.round(r2.width) + "x" + Math.round(r2.height));
+      res.push("inView=" + (top >= -2 && top + r2.height <= s.height + 2));
+    }
+    res.push("confirmBtn=" + (document.querySelector("#screen .dialog-confirm") ? "Y" : "N"));
+    const cancel = document.querySelector("#screen .dialog-cancel");
+    if (cancel) { cancel.click(); await sleep(300); res.push("afterCancel=" + raw.showDeleteConfirm); }
+    if (item) item.click();
+    await sleep(300);
+    const ok = document.querySelector("#screen .dialog-confirm");
+    if (ok) { ok.click(); await sleep(700); res.push("afterConfirm=" + currentRel); }
+    rep.push({ kind: "lifecycle", level: "info", code: "DELTEST", title: "del path", message: res.join(" | "), hint: "", file: "deltap", line: 0 });
+  }, 700);
+
   if (qs.get("switch")) setTimeout(async () => {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     runPage("pages/keyboard/keyboard");
