@@ -697,6 +697,17 @@ window.addEventListener("unhandledrejection", e => {
       res.push("inView=" + (top >= -2 && top + r2.height <= s.height + 2));
     }
     res.push("confirmBtn=" + (document.querySelector("#screen .dialog-confirm") ? "Y" : "N"));
+    // 量 dialog 及子元素真实尺寸（真机曾塌成一条：只有 padding、内部全 0 高）
+    const scrRect = document.querySelector("#screen").getBoundingClientRect();
+    const box = (sel) => {
+      const e = document.querySelector(sel);
+      if (!e) return sel + "=none";
+      const r = e.getBoundingClientRect();
+      return sel.replace("#screen .", "") + "=" + Math.round(r.width) + "x" + Math.round(r.height)
+        + "@y" + Math.round(r.top - scrRect.top);
+    };
+    res.push([box(".overlay"), box(".dialog"), box(".dialog-title"), box(".dialog-row"),
+              box(".dialog-btn"), box(".dialog-btn-text")].join(" | "));
     const cancel = document.querySelector("#screen .dialog-cancel");
     if (cancel) { cancel.click(); await sleep(300); res.push("afterCancel=" + raw.showDeleteConfirm); }
     if (item) item.click();
